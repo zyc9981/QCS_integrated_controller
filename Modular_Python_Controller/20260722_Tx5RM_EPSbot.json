@@ -1,0 +1,157 @@
+{
+  "CQS": {
+    "chip_id": 0,
+    "pin": 3,
+    "voltage": 14.9
+  },
+  "QS1": {
+    "chip_id": 0,
+    "pin": 13,
+    "voltage": 8.0
+  },
+  "QS2top": {
+    "chip_id": 0,
+    "pin": 10,
+    "voltage": 0.0
+  },
+  "QS2bot": {
+    "chip_id": 1,
+    "pin": 4,
+    "voltage": 10.35
+  },
+  "IntSec": {
+    "chip_id": 1,
+    "pin": 7,
+    "voltage": 17.0
+  },
+  "RTRtop": {
+    "chip_id": 1,
+    "pin": 1,
+    "voltage": 0.0
+  },
+  "RTRbot": {
+    "chip_id": 0,
+    "pin": 14,
+    "voltage": 19.77
+  },
+  "QF11": {
+    "chip_id": 1,
+    "pin": 2,
+    "voltage": 18.33
+  },
+  "QF12": {
+    "chip_id": 1,
+    "pin": 3,
+    "voltage": 21.55
+  },
+  "QF21": {
+    "chip_id": 1,
+    "pin": 6,
+    "voltage": 22.04
+  },
+  "QF22": {
+    "chip_id": 1,
+    "pin": 5,
+    "voltage": 15.77
+  },
+  "QF31": {
+    "chip_id": 0,
+    "pin": 8,
+    "voltage": 19.25
+  },
+  "QF32": {
+    "chip_id": 0,
+    "pin": 9,
+    "voltage": 12.42
+  },
+  "QF41": {
+    "chip_id": 0,
+    "pin": 12,
+    "voltage": 13.05
+  },
+  "QF42": {
+    "chip_id": 0,
+    "pin": 11,
+    "voltage": 16.4
+  },
+  "MUXa": {
+    "chip_id": 0,
+    "pin": 0,
+    "voltage": 19.3
+  },
+  "PCa1": {
+    "chip_id": 0,
+    "pin": 2,
+    "voltage": 10.1
+  },
+  "PCa2": {
+    "chip_id": 0,
+    "pin": 5,
+    "voltage": 10.3
+  },
+  "PCa3": {
+    "chip_id": 0,
+    "pin": 7,
+    "voltage": 10.3
+  },
+  "MUXb": {
+    "chip_id": 0,
+    "pin": 15,
+    "voltage": 15.2
+  },
+  "PCb1": {
+    "chip_id": 0,
+    "pin": 1,
+    "voltage": 11.2
+  },
+  "PCb2": {
+    "chip_id": 0,
+    "pin": 4,
+    "voltage": 10.0
+  },
+  "PCb3": {
+    "chip_id": 0,
+    "pin": 6,
+    "voltage": 13.3
+  },
+  "MUXc": {
+    "chip_id": 1,
+    "pin": 0,
+    "voltage": 15.45
+  },
+  "PCc1": {
+    "chip_id": 1,
+    "pin": 14,
+    "voltage": 9.4
+  },
+  "PCc2": {
+    "chip_id": 1,
+    "pin": 12,
+    "voltage": 13.0
+  },
+  "PCc3": {
+    "chip_id": 1,
+    "pin": 10,
+    "voltage": 12.4
+  },
+  "MUXd": {
+    "chip_id": 1,
+    "pin": 15,
+    "voltage": 12.4
+  },
+  "PCd1": {
+    "chip_id": 1,
+    "pin": 13,
+    "voltage": 9.3
+  },
+  "PCd2": {
+    "chip_id": 1,
+    "pin": 11,
+    "voltage": 11.5
+  },
+  "PCd3": {
+    "chip_id": 1,
+    "pin": 9,
+    "voltage": 14.9
+  }
+}

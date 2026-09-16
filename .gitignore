@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.pyc
+
+*.gds
+*.npz
+*.txt
+*.png
+*.xml
+*.pyc
+__pycache__/
+*.csv
+*.iml
+*.mp4
+*.mat
+*.asv
+
+
+
+# Large timestamp and measurement data
+*.bin
+*.ptu
+*.h5
+*.hdf5
+*.mat
+*.npy
+*.npz
+
+# Archives
+*.zip
+*.7z
+
+# Calibration and generated logs
+automatic_calib_logs/
+*.log
