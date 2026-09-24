@@ -1,0 +1,32 @@
+{
+  "CQS": {
+    "chip_id": 1,
+    "pin": 13,
+    "voltage": 18.0
+  },
+  "PPS_RTR": {
+    "chip_id": 1,
+    "pin": 8,
+    "voltage": 10.47
+  },
+  "PPS_CPL": {
+    "chip_id": 1,
+    "pin": 9,
+    "voltage": 9.95
+  },
+  "UMZI": {
+    "chip_id": 1,
+    "pin": 10,
+    "voltage": 16.4
+  },
+  "WDMtop": {
+    "chip_id": 1,
+    "pin": 11,
+    "voltage": 5.0
+  },
+  "WDMbot": {
+    "chip_id": 1,
+    "pin": 12,
+    "voltage": 5.0
+  }
+}

@@ -367,6 +367,7 @@ def _piezoscan_process_queue(app):
                     )
                     app.piezoscan_ax.legend()
                     app.piezoscan_ax.grid(True)
+                    app.piezoscan_ax.set_ylim(bottom=0, auto=None)
                     app.piezoscan_fig.tight_layout()
                     app.piezoscan_fig.show()
 
@@ -387,6 +388,8 @@ def _piezoscan_process_queue(app):
                         line.set_data(xs, ys)
                     app.piezoscan_ax.relim()
                     app.piezoscan_ax.autoscale_view()
+                    # Preserve y autoscaling so the upper limit follows new data.
+                    app.piezoscan_ax.set_ylim(bottom=0, auto=None)
                     app.piezoscan_fig.canvas.draw_idle()
                     app.piezoscan_fig.canvas.flush_events()
 
@@ -482,6 +485,7 @@ def _plot_piezoscan_results(app, frequencies, pd_values, pd_channels):
     ax.set_title(f"Ring piezo scan - {format_pd_label(pd_channels)}")
     ax.legend()
     ax.grid(True)
+    ax.set_ylim(bottom=0, auto=None)
     fig.tight_layout()
     plt.show()
 
@@ -604,6 +608,7 @@ def tx_scan_piezo(app):
         app.piezoscan_ax.set_title(f"Ring piezo scan - {format_pd_label(pd_channels)}")
         app.piezoscan_ax.legend()
         app.piezoscan_ax.grid(True)
+        app.piezoscan_ax.set_ylim(bottom=0, auto=None)
         app.piezoscan_fig.tight_layout()
         app.piezoscan_fig.show()
 

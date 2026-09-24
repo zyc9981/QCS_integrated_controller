@@ -43,17 +43,22 @@ def _ensure_calib_state(app):
 
     app.calib_wavelengths = []
     app.calib_pd_values = []
+    app.calib_pd_values_by_channel = {}
+    app.calib_selected_pds = []
+    app.calib_scan_mode = None
     app.calib_prev_rx_polling = False
 
     app.calib_fig = None
     app.calib_ax = None
     app.calib_line = None
+    app.calib_lines = {}
 
     # Defaults for dialog, if not already present
     app.last_calib_start_nm = getattr(app, "last_calib_start_nm", 1545.0)
     app.last_calib_end_nm   = getattr(app, "last_calib_end_nm",   1550.0)
     app.last_calib_step_nm  = getattr(app, "last_calib_step_nm",  0.01)
     app.last_calib_pd       = getattr(app, "last_calib_pd",       1)
+    app.last_calib_pds = list(getattr(app, "last_calib_pds", [app.last_calib_pd]))
     app.last_calib_live_plot = getattr(app, "last_calib_live_plot", False)
 
     app._calib_state_init = True
@@ -61,7 +66,7 @@ def _ensure_calib_state(app):
 
 def _ask_calibration_params(app):
     """
-    Modal dialog to get (start_nm, end_nm, step_nm, pd_channel, live_plot).
+    Modal dialog to get (start_nm, end_nm, step_nm, pd_channels, live_plot).
     Returns None if cancelled.
     """
     _ensure_calib_state(app)
@@ -74,12 +79,19 @@ def _ask_calibration_params(app):
     Label(dlg, text="Sweep start (nm):").grid(row=0, column=0, sticky='e', padx=5, pady=5)
     Label(dlg, text="Sweep end (nm):").grid(row=1, column=0, sticky='e', padx=5, pady=5)
     Label(dlg, text="Step (nm):").grid(row=2, column=0, sticky='e', padx=5, pady=5)
-    Label(dlg, text="Photon detector:").grid(row=3, column=0, sticky='e', padx=5, pady=10)
+    Label(dlg, text="Photon detectors:").grid(row=3, column=0, sticky='ne', padx=5, pady=10)
 
     start_var = StringVar(value=str(app.last_calib_start_nm))
     end_var   = StringVar(value=str(app.last_calib_end_nm))
     step_var  = StringVar(value=str(app.last_calib_step_nm))
-    pd_var    = IntVar(value=int(app.last_calib_pd))
+    available_pds = sorted(getattr(app, "rx_pd_to_channel", {}).keys())
+    if not available_pds:
+        available_pds = list(range(int(getattr(app, "rx_detector_count", 0))))
+    previous_pds = set(getattr(app, "last_calib_pds", [app.last_calib_pd]))
+    pd_vars = {
+        pd: BooleanVar(value=pd in previous_pds)
+        for pd in available_pds
+    }
 
     Entry(dlg, textvariable=start_var, width=10).grid(row=0, column=1, padx=5, pady=5)
     Entry(dlg, textvariable=end_var,   width=10).grid(row=1, column=1, padx=5, pady=5)
@@ -87,8 +99,13 @@ def _ask_calibration_params(app):
 
     pd_frame = Frame(dlg)
     pd_frame.grid(row=3, column=1, padx=5, pady=5, sticky='w')
-    for ch in range(0, 9):
-        Radiobutton(pd_frame, text=f"PD{ch}", variable=pd_var, value=ch).pack(side="left", padx=4)
+    for column, pd in enumerate(available_pds):
+        Checkbutton(pd_frame, text=f"PD{pd}", variable=pd_vars[pd]).grid(
+            row=column // 5,
+            column=column % 5,
+            sticky="w",
+            padx=4,
+        )
 
     live_var = BooleanVar(value=bool(app.last_calib_live_plot))
     Checkbutton(
@@ -110,7 +127,15 @@ def _ask_calibration_params(app):
         if st <= 0:
             messagebox.showerror("Invalid input", "Step must be > 0.", parent=dlg)
             return
-        result["vals"] = (s, e, st, pd_var.get(), live_var.get())
+        selected_pds = [pd for pd in available_pds if pd_vars[pd].get()]
+        if not selected_pds:
+            messagebox.showerror(
+                "No detector selected",
+                "Select at least one photon detector.",
+                parent=dlg,
+            )
+            return
+        result["vals"] = (s, e, st, selected_pds, live_var.get())
         dlg.destroy()
 
     def on_cancel():
@@ -237,22 +262,18 @@ def _ask_ring_calibration_params(app):
 
 
 
-def _measure_pd_worker(app, pd_channel: int, timeout_s: float = 0.3) -> float:
-    """
-    Blocking PD read for use in the calibration worker thread.
-
-    Assumes the RX Arduino is already in STREAM mode and is continuously
-    printing lines like:
-        "1234  567  890  1150"
-    corresponding to PD1..PD4.
-
-    We read one such line and return the requested channel.
-    """
+def _measure_pd_values_worker(app, pd_channels, timeout_s: float = 0.3):
+    """Read all requested PD values from one RX streaming sample."""
     from python_controller import readline_str
 
-    chan_idx = int(pd_channel)
-    if not (0 <= chan_idx <= 3):
-        raise ValueError(f"pd_channel must be 1..4, got {pd_channel}")
+    channels = tuple(dict.fromkeys(int(channel) for channel in pd_channels))
+    detector_count = int(getattr(app, "rx_detector_count", 0))
+    if not channels:
+        raise ValueError("At least one photon detector must be selected.")
+    if any(channel < 0 or channel >= detector_count for channel in channels):
+        raise ValueError(
+            f"PD channels must be in 0..{detector_count - 1}, got {list(channels)}"
+        )
 
     with _rx_serial_guard(app):
         t0 = time.time()
@@ -260,35 +281,43 @@ def _measure_pd_worker(app, pd_channel: int, timeout_s: float = 0.3) -> float:
             line = readline_str(app.rx)
             if not line:
                 continue
-            line = line.strip()
-            if not line:
+            parts = line.strip().split()
+            if not parts:
                 continue
-
-            parts = line.split()
-
-            # Skip header or non-numeric lines (e.g. "ACK", "PD1 PD2 PD3 PD4")
             try:
-                vals = [float(tok) for tok in parts]
+                values = [float(token) for token in parts]
             except ValueError:
                 continue
-
-            if len(vals) < 4:
+            if len(values) < detector_count:
                 continue
 
-            if hasattr(app, "rx_apply_pd_dark_noise_value"):
-                return app.rx_apply_pd_dark_noise_value(vals[chan_idx], chan_idx)
-            return vals[chan_idx]
+            return {
+                channel: (
+                    app.rx_apply_pd_background_offset_value(values[channel], channel)
+                    if hasattr(app, "rx_apply_pd_background_offset_value")
+                    else values[channel]
+                )
+                for channel in channels
+            }
 
-    raise TimeoutError(f"Timeout waiting for PD{pd_channel} streaming value")
+    selected = ", ".join(f"PD{channel}" for channel in channels)
+    raise TimeoutError(f"Timeout waiting for streaming values from {selected}")
+
+
+def _measure_pd_worker(app, pd_channel: int, timeout_s: float = 0.3) -> float:
+    """Read one PD value; retained for automatic ring calibration."""
+    return _measure_pd_values_worker(app, [pd_channel], timeout_s)[int(pd_channel)]
 
 
 
-def _calibration_worker(app, start_nm, end_nm, step_nm, pd_ch):
+def _calibration_worker(app, start_nm, end_nm, step_nm, pd_channels):
     """
     Runs in a background thread. Does NOT touch Tk.
     Sends progress + data back via app.calib_queue.
     """
     from python_controller import readline_str
+
+    selected_label = ", ".join(f"PD{channel}" for channel in pd_channels)
 
     direction = 1 if end_nm >= start_nm else -1
     step = abs(step_nm) * direction
@@ -319,10 +348,11 @@ def _calibration_worker(app, start_nm, end_nm, step_nm, pd_ch):
         time.sleep(pre_settle_s)
         _flush_rx_buffer(app)
         try:
-            dummy = _measure_pd_worker(app, pd_ch, timeout_s=0.3)
+            dummy = _measure_pd_values_worker(app, pd_channels, timeout_s=0.3)
             app.calib_queue.put((
                 "log",
-                f"[CAL] Discarded first transient PD{pd_ch}={dummy} at λ={start_nm:.4f} nm"
+                f"[CAL] Discarded first transient sample for {selected_label}: {dummy} "
+                f"at λ={start_nm:.4f} nm"
             ))
         except Exception as e:
             app.calib_queue.put((
@@ -343,7 +373,7 @@ def _calibration_worker(app, start_nm, end_nm, step_nm, pd_ch):
     try:
         # Optional: discard first PD sample after the big jump to avoid transients
         try:
-            _ = _measure_pd_worker(app, pd_ch, timeout_s=0.3)
+            _ = _measure_pd_values_worker(app, pd_channels, timeout_s=0.3)
         except Exception:
             pass
 
@@ -355,16 +385,19 @@ def _calibration_worker(app, start_nm, end_nm, step_nm, pd_ch):
             app.laser.set_wavelength_nm(lam)
 
             try:
-                val = _measure_pd_worker(app, pd_ch, timeout_s=0.3)
+                values = _measure_pd_values_worker(app, pd_channels, timeout_s=0.3)
             except Exception as e:
                 app.calib_queue.put((
                     "error",
-                    f"Error reading PD{pd_ch} at λ={lam:.4f} nm: {e}"
+                    f"Error reading {selected_label} at λ={lam:.4f} nm: {e}"
                 ))
                 return
 
-            app.calib_queue.put(("log", f"[CAL]   -> PD{pd_ch} = {val}"))
-            app.calib_queue.put(("point", lam, val))
+            readings = ", ".join(
+                f"PD{channel}={values[channel]}" for channel in pd_channels
+            )
+            app.calib_queue.put(("log", f"[CAL]   -> {readings}"))
+            app.calib_queue.put(("scan_point", lam, values))
 
             lam += step
 
@@ -442,6 +475,23 @@ def _calib_process_queue(app):
                     app.calib_fig.canvas.draw_idle()
                     app.calib_fig.canvas.flush_events()
 
+            elif kind == "scan_point":
+                _, lam, values = item
+                app.calib_wavelengths.append(lam)
+                for channel in app.calib_selected_pds:
+                    app.calib_pd_values_by_channel[channel].append(values[channel])
+
+                if app.calib_live_plot and app.calib_fig is not None:
+                    for channel, line in app.calib_lines.items():
+                        line.set_data(
+                            app.calib_wavelengths,
+                            app.calib_pd_values_by_channel[channel],
+                        )
+                    app.calib_ax.relim()
+                    app.calib_ax.autoscale_view()
+                    app.calib_fig.canvas.draw_idle()
+                    app.calib_fig.canvas.flush_events()
+
             elif kind == "ring_scan_result":
                 _, it, lambda_filter, lambda_dip, delta_nm = item
                 app.tx_log_print(
@@ -489,6 +539,31 @@ def _calib_finish(app, success: bool, info: str):
         app.rx_polling = True
         app.rx_poll()
 
+    if getattr(app, "calib_scan_mode", None) == "wavelength_scan":
+        if not app.calib_wavelengths:
+            app.tx_log_print("[SCAN] No data collected.")
+            if not success:
+                app.tx_log_print(f"[SCAN] Aborted: {info}")
+        elif success:
+            app.tx_log_print(f"[SCAN] Completed: {info}")
+        else:
+            app.tx_log_print(f"[SCAN] Aborted: {info}")
+
+        if app.calib_wavelengths:
+            if not app.calib_live_plot:
+                _plot_wavelength_scan_results(
+                    app,
+                    app.calib_wavelengths,
+                    app.calib_pd_values_by_channel,
+                )
+            _save_wavelength_scan_csv(
+                app,
+                app.calib_wavelengths,
+                app.calib_pd_values_by_channel,
+            )
+        app.calib_scan_mode = None
+        return
+
     if not app.calib_wavelengths:
         app.tx_log_print("[CAL] No data collected.")
         if not success:
@@ -515,6 +590,47 @@ def _calib_finish(app, success: bool, info: str):
         app.calib_pd_values,
         app.last_calib_pd,
     )
+
+
+def _plot_wavelength_scan_results(app, wavelengths, values_by_channel):
+    fig, ax = plt.subplots()
+    for channel in app.calib_selected_pds:
+        ax.plot(
+            wavelengths,
+            values_by_channel[channel],
+            marker="o",
+            label=f"PD{channel}",
+        )
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel("Detector value (arb. units)")
+    ax.set_title("Wavelength scan")
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+
+def _save_wavelength_scan_csv(app, wavelengths, values_by_channel):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(base_dir, "automatic_calib_logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    channels = list(app.calib_selected_pds)
+    channel_suffix = "_".join(f"PD{channel}" for channel in channels)
+    fname = time.strftime(f"wavelength_scan_{channel_suffix}_%Y%m%d_%H%M%S.csv")
+    fpath = os.path.join(log_dir, fname)
+
+    try:
+        with open(fpath, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["wavelength_nm", *[f"PD{channel}" for channel in channels]])
+            for row_index, wavelength in enumerate(wavelengths):
+                writer.writerow(
+                    [wavelength, *[values_by_channel[channel][row_index] for channel in channels]]
+                )
+        app.tx_log_print(f"[SCAN] Saved {len(wavelengths)} points to {fpath}")
+    except Exception as e:
+        app.tx_log_print(f"[SCAN] Could not save CSV: {e}")
 
 
 def _plot_calibration_results(app, wavelengths, pd_values, pd_ch):
@@ -862,20 +978,22 @@ def tx_scan_frequency(app):
     if params is None:
         return
 
-    start_nm, end_nm, step_nm, pd_ch, live_plot = params
+    start_nm, end_nm, step_nm, pd_channels, live_plot = params
 
     # Remember for next time
     app.last_calib_start_nm = start_nm
     app.last_calib_end_nm   = end_nm
     app.last_calib_step_nm  = step_nm
-    app.last_calib_pd       = pd_ch
+    app.last_calib_pds = list(pd_channels)
+    app.last_calib_pd = pd_channels[0]
     app.last_calib_live_plot = bool(live_plot)
 
     app.calib_live_plot = bool(live_plot)
-
+    selected_label = ", ".join(f"PD{channel}" for channel in pd_channels)
     app.tx_log_print(
-        f"[CAL] Starting ring calibration: λ from {start_nm:.4f} to {end_nm:.4f} nm "
-        f"in steps of {abs(step_nm):.4f} nm, PD{pd_ch}, live_plot={app.calib_live_plot}"
+        f"[SCAN] Starting wavelength scan: {start_nm:.4f} to {end_nm:.4f} nm "
+        f"in steps of {abs(step_nm):.4f} nm, {selected_label}, "
+        f"live_plot={app.calib_live_plot}"
     )
 
     # Stop RX polling so worker can use serial safely
@@ -885,15 +1003,23 @@ def tx_scan_frequency(app):
     # Reset data buffers
     app.calib_wavelengths = []
     app.calib_pd_values = []
+    app.calib_selected_pds = list(pd_channels)
+    app.calib_pd_values_by_channel = {channel: [] for channel in pd_channels}
+    app.calib_scan_mode = "wavelength_scan"
 
     # Optional live plot setup in main thread
     app.calib_fig = app.calib_ax = app.calib_line = None
+    app.calib_lines = {}
     if app.calib_live_plot:
         app.calib_fig, app.calib_ax = plt.subplots()
-        (app.calib_line,) = app.calib_ax.plot([], [], marker='o')
+        for channel in pd_channels:
+            (app.calib_lines[channel],) = app.calib_ax.plot(
+                [], [], marker="o", label=f"PD{channel}"
+            )
+        app.calib_ax.legend()
         app.calib_ax.set_xlabel("Wavelength (nm)")
-        app.calib_ax.set_ylabel(f"PD{pd_ch} (arb. units)")
-        app.calib_ax.set_title(f"Ring calibration – PD{pd_ch}")
+        app.calib_ax.set_ylabel("Detector value (arb. units)")
+        app.calib_ax.set_title("Wavelength scan")
         app.calib_ax.grid(True)
         app.calib_fig.tight_layout()
         app.calib_fig.show()
@@ -902,7 +1028,7 @@ def tx_scan_frequency(app):
     app.calib_running = True
     app.calib_thread = threading.Thread(
         target=_calibration_worker,
-        args=(app, start_nm, end_nm, step_nm, pd_ch),
+        args=(app, start_nm, end_nm, step_nm, pd_channels),
         daemon=True,
     )
     app.calib_thread.start()

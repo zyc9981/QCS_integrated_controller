@@ -55,15 +55,9 @@ except Exception:
 LASER_HOST = "192.168.1.200"
 Tx_port_num = 4
 Rx_port_num = 3
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("default_voltages.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260423_RTRtop_4QF.json")
 # DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("Turn_Off.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260503_All.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260609_WDM.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260615_ALL2.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260703_ALL3.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260706_Tx5RM_ALL1.json")
-DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260722_Tx5RM_EPSbot.json")
+# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260922_QCSTX1_RT1.json")
+DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260924_QCSTX1_RB4.json")
 # DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("alan.json")
 RX_BACKGROUND_OFFSETS_PATH = Path(__file__).with_name("rx_background_offsets.json")
 
@@ -95,15 +89,15 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self.default_voltages_path = DEFAULT_VOLTAGES_PATH
         self.rx_background_offsets_path = RX_BACKGROUND_OFFSETS_PATH
         self.rx_pd_to_channel = {
-            0: 10,
-            1: 2,
-            2: 3,
-            3: 4,
-            4: 5,
-            5: 6,
-            6: 7,
-            7: 8,
-            8: 9,
+            0: 0,
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 4,
+            5: 5,
+            6: 6,
+            7: 7,
+            8: 8,
         }
         self.rx_channel_to_pd = {
             channel: pd_index for pd_index, channel in self.rx_pd_to_channel.items()
@@ -114,11 +108,11 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self.rx_decode_channel_number = self.rx_pd_to_channel.get(self.rx_decode_detector_index, 2)
         self.rx_threshold_value = None
         self.rx_channel_groups = [
-            (2, 3),
-            (4, 5),
-            (6, 7),
-            (8, 9),
-            (10,),
+            (1, 2),
+            (3, 4),
+            (5, 6),
+            (7, 8),
+            (0,),
         ]
         self.rx_detector_count = len(self.rx_pd_to_channel)
         self.qutag_hist_start_channel = 1
@@ -136,32 +130,32 @@ class App(TxCommandsMixin, RxCommandsMixin):
         # steps.  Device configuration now belongs to Time Tagger X.
         self.qutag = None
         self.time_tagger = None
-        # self.time_tagger_setting_channels = [1, 2, -3, -4]
-        # self.time_tagger_trigger_levels = {
-        #     1: 0.5,
-        #     2: 0.5,
-        #     -3: -0.15,
-        #     -4: -0.2,
-        # }
-        # self.time_tagger_channel_delays_ps = {
-        #     1: 0,
-        #     2: 0,
-        #     -3: 0,
-        #     -4: 0,
-        # }
-        self.time_tagger_setting_channels = [-1, -2, -3, -4]
+        self.time_tagger_setting_channels = [1, 2, -3, -4]
         self.time_tagger_trigger_levels = {
-            -1: -0.15,
-            -2: -0.15,
+            1: 0.5,
+            2: 0.5,
             -3: -0.15,
             -4: -0.15,
         }
         self.time_tagger_channel_delays_ps = {
-            -1: 0,
-            -2: 0,
+            1: 0,
+            2: 0,
             -3: 0,
             -4: 0,
         }
+        # self.time_tagger_setting_channels = [-1, -2, -3, -4]
+        # self.time_tagger_trigger_levels = {
+        #     -1: -0.15,
+        #     -2: -0.15,
+        #     -3: -0.15,
+        #     -4: -0.15,
+        # }
+        # self.time_tagger_channel_delays_ps = {
+        #     -1: 0,
+        #     -2: 0,
+        #     -3: 0,
+        #     -4: 0,
+        # }
         # The Counter bin width replaces QuTAG's exposure time.  Counts from
         # the Time Tagger and the HydraHarp plot are both displayed per bin.
         self.time_tagger_count_bin_width_ms = 50.0
@@ -280,24 +274,45 @@ class App(TxCommandsMixin, RxCommandsMixin):
         return True
 
     def init_hydraharp(self):
-        """Start the HydraHarp T2 time trace used by the Rx SPD plot."""
+        """Start the optional HydraHarp T2 time trace used by the Rx SPD plot."""
+        # The rest of the controller is designed to run without a HydraHarp.
+        # Keep that state explicit before attempting discovery, so any failed
+        # initialization leaves all later code treating it as unavailable.
+        self.hydraharp = None
         if snAPI is None:
             print("HydraHarp unavailable: snAPI wrapper import failed.")
             return False
 
         hydraharp = None
+
+        def release_hydraharp():
+            if hydraharp is None:
+                return
+            try:
+                hydraharp.closeDevice()
+            except Exception:
+                pass
+            try:
+                hydraharp.exitAPI()
+            except Exception:
+                pass
+
         try:
             hydraharp = snAPI(libType=LibType.HH)
             if not hydraharp.getDevice():
-                raise RuntimeError("No HydraHarp device was found.")
+                print("HydraHarp not detected; continuing without it.")
+                release_hydraharp()
+                return False
             if not hydraharp.initDevice(
                 MeasMode.T2,
                 refSrc=self.hydraharp_ref_source,
             ):
-                raise RuntimeError(
-                    "Could not initialize HydraHarp in T2 mode with "
-                    f"reference source {self.hydraharp_ref_source.name}."
+                print(
+                    "HydraHarp could not be initialized in T2 mode "
+                    f"({self.hydraharp_ref_source.name}); continuing without it."
                 )
+                release_hydraharp()
+                return False
 
             hydraharp.setLogLevel(LogLevel.Config, True)
             if self.hydraharp_config_path.is_file():
@@ -315,12 +330,8 @@ class App(TxCommandsMixin, RxCommandsMixin):
             if not hydraharp.timeTrace.measure(0, waitFinished=False, savePTU=False):
                 raise RuntimeError("Could not start HydraHarp time trace.")
         except Exception as exc:
-            if hydraharp is not None:
-                try:
-                    hydraharp.exitAPI()
-                except Exception:
-                    pass
-            print("ERROR: Could not initialize HydraHarp:", exc)
+            release_hydraharp()
+            print(f"HydraHarp unavailable ({exc}); continuing without it.")
             return False
 
         self.hydraharp = hydraharp
