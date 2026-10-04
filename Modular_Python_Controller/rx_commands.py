@@ -395,7 +395,7 @@ class RxCommandsMixin:
 
         time.sleep(0.5)
         with self.rx_serial_lock:
-            self.rx = open_arduino(f"COM{self.rx_port_num}", 115200, 0.05)
+            self.rx = open_arduino(self.rx_port, 115200, 0.05)
             while True:
                 line = readline_str(self.rx)
                 if line.strip() == "RX Ready.":
@@ -423,7 +423,7 @@ class RxCommandsMixin:
 
         self.rx_polling = True
         self.rx_start_reader_thread()
-        self.rx_log_print(f"[RX] Reconnected to COM{self.rx_port_num} (Ready.)")
+        self.rx_log_print(f"[RX] Reconnected to {self.rx_port} (Ready.)")
 
     def rx_parse_values(self, line: str):
         parts = line.strip().split()

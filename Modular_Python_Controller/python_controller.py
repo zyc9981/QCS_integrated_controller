@@ -53,12 +53,9 @@ except Exception:
     print("HydraHarp snAPI wrapper is not in the search path.")
 
 LASER_HOST = "192.168.1.200"
-Tx_port_num = 4
-Rx_port_num = 3
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("Turn_Off.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260922_QCSTX1_RT1.json")
+TX_PORT = "/dev/ttyACM0"
+RX_PORT = "/dev/ttyACM1"
 DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("20260924_QCSTX1_RB4.json")
-# DEFAULT_VOLTAGES_PATH = Path(__file__).with_name("alan.json")
 RX_BACKGROUND_OFFSETS_PATH = Path(__file__).with_name("rx_background_offsets.json")
 
 UI = {
@@ -84,8 +81,8 @@ UI = {
 class App(TxCommandsMixin, RxCommandsMixin):
     def __init__(self):
         self.ui = UI
-        self.tx_port_num = Tx_port_num
-        self.rx_port_num = Rx_port_num
+        self.tx_port = TX_PORT
+        self.rx_port = RX_PORT
         self.default_voltages_path = DEFAULT_VOLTAGES_PATH
         self.rx_background_offsets_path = RX_BACKGROUND_OFFSETS_PATH
         self.rx_pd_to_channel = {
@@ -213,14 +210,14 @@ class App(TxCommandsMixin, RxCommandsMixin):
             (1, 0),
         ]
 
-        self.tx = open_arduino(f"COM{self.tx_port_num}", 115200, 0.2)
+        self.tx = open_arduino(self.tx_port, 115200, 0.2)
         while True:
             line = readline_str(self.tx)
             if line.strip() == "TX Ready.":
                 break
         print("Connected to TX")
 
-        self.rx = open_arduino(f"COM{self.rx_port_num}", 115200, 0.05)
+        self.rx = open_arduino(self.rx_port, 115200, 0.05)
         while True:
             line = readline_str(self.rx)
             if line.strip() == "RX Ready.":
