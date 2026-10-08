@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 import ast
 import collections
+from datetime import datetime
 import json
+import os
 import queue
 import threading
 import time
 import numpy as np
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from optical_stream import OpticalLink, hydraharp_blocks
 
 from tkinter import (
     Tk,
@@ -37,7 +42,7 @@ from tx_commands import TxCommandsMixin
 from ring_calibration_helper import tx_scan_frequency
 from highQ_piezoscan_helper import tx_scan_piezo
 from qutag_piezoscan_helper import tx_scan_piezo_qutag
-from qutag_timestamp_helper import open_qutag_timestamp_window
+from qutag_timestamp_helper import open_qutag_timestamp_window, _stop_timestamp_writing
 from scan_2v_analyzer import run_scan_2v_analyzer
 
 try:
@@ -47,10 +52,10 @@ except Exception:
     print("Time Tagger X import failed.")
 
 try:
-    from snAPI.Main import LibType, LogLevel, MeasMode, RefSource, snAPI
-except Exception:
-    LibType = LogLevel = MeasMode = RefSource = snAPI = None
-    print("HydraHarp snAPI wrapper is not in the search path.")
+    from picoquant_snapi import LogLevel, MeasMode, RefSource, create_hydraharp_api
+except Exception as exc:
+    LogLevel = MeasMode = RefSource = create_hydraharp_api = None
+    print(f"HydraHarp snAPI import failed: {exc}")
 
 LASER_HOST = "192.168.1.200"
 TX_PORT = "/dev/ttyACM0"
@@ -182,6 +187,12 @@ class App(TxCommandsMixin, RxCommandsMixin):
         )
         self.load_hydraharp_time_trace_settings()
         self.hydraharp = None
+        self.hydraharp_raw_recording = False
+        self.optical_capture_active = False
+        self.optical_capture_thread = None
+        self.optical_capture_stop = threading.Event()
+        self.optical_capture_events = queue.Queue()
+        self.optical_closing = False
         self.hydraharp_setting_channels = []
         self.hydraharp_enabled_channels = set()
         self.hydraharp_cfd_levels_mV = {}
@@ -276,7 +287,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
         # Keep that state explicit before attempting discovery, so any failed
         # initialization leaves all later code treating it as unavailable.
         self.hydraharp = None
-        if snAPI is None:
+        if create_hydraharp_api is None:
             print("HydraHarp unavailable: snAPI wrapper import failed.")
             return False
 
@@ -289,13 +300,11 @@ class App(TxCommandsMixin, RxCommandsMixin):
                 hydraharp.closeDevice()
             except Exception:
                 pass
-            try:
-                hydraharp.exitAPI()
-            except Exception:
-                pass
+            # snAPI.__del__ releases the native API. An explicit exitAPI()
+            # here can make some Linux builds release it a second time.
 
         try:
-            hydraharp = snAPI(libType=LibType.HH)
+            hydraharp = create_hydraharp_api()
             if not hydraharp.getDevice():
                 print("HydraHarp not detected; continuing without it.")
                 release_hydraharp()
@@ -398,6 +407,8 @@ class App(TxCommandsMixin, RxCommandsMixin):
         hydraharp = getattr(self, "hydraharp", None)
         if hydraharp is None:
             raise RuntimeError("HydraHarp is not initialized.")
+        if self.hydraharp_raw_recording or getattr(self, "qutag_timestamp_preparing_hydraharp", False):
+            raise RuntimeError("Stop the HydraHarp T2 recording before changing its settings.")
 
         for channel in self.hydraharp_setting_channels:
             enabled = int(channel in self.hydraharp_enabled_channels)
@@ -488,10 +499,209 @@ class App(TxCommandsMixin, RxCommandsMixin):
             hydraharp.closeDevice()
         except Exception:
             pass
+        # The installed snAPI object calls exitAPI() in its destructor.
+
+    def restart_hydraharp_time_trace(self):
+        """Resume live counts after a raw T2 measurement has fully stopped."""
+        if self.hydraharp is None:
+            raise RuntimeError("HydraHarp is not connected.")
+        self.hydraharp.timeTrace.setNumBins(self.hydraharp_time_trace_num_bins)
+        self.hydraharp.timeTrace.setHistorySize(self.hydraharp_time_trace_history_size_s)
+        if not self.hydraharp.timeTrace.measure(0, waitFinished=False, savePTU=False):
+            raise RuntimeError("timeTrace.measure returned False")
+
+    def open_optical_capture_window(self):
+        window = getattr(self, "optical_capture_win", None)
+        if window is not None and window.winfo_exists():
+            window.lift()
+            return
+
+        window = Toplevel(self.tx_win)
+        self.optical_capture_win = window
+        window.title("HydraHarp to QSFP")
+        self._style_window(window, minsize=(620, 220))
+        body = self._frame(window)
+        body.pack(fill="both", expand=True, padx=16, pady=14)
+        self._label(body, "HydraHarp T2 optical loopback", size=14, weight="bold").pack(anchor="w")
+        self._label(body, "Returned records are saved as raw 32-bit T2 data (.bin).", fg=UI["muted"]).pack(anchor="w", pady=(4, 12))
+
+        duration_row = self._frame(body)
+        duration_row.pack(fill="x", pady=4)
+        self._label(duration_row, "Duration (s)").pack(side=LEFT)
+        self.optical_duration_var = StringVar(value="10")
+        Entry(duration_row, textvariable=self.optical_duration_var, width=9).pack(side=LEFT, padx=10)
+
+        output_row = self._frame(body)
+        output_row.pack(fill="x", pady=4)
+        self._label(output_row, "Output file").pack(side=LEFT)
+        default_path = PROJECT_ROOT / f"hh_t2_returned_{datetime.now():%Y%m%d_%H%M%S_%f}.bin"
+        self.optical_output_var = StringVar(value=str(default_path))
+        Entry(output_row, textvariable=self.optical_output_var).pack(side=LEFT, fill="x", expand=True, padx=10)
+
+        buttons = self._frame(body)
+        buttons.pack(fill="x", pady=(12, 6))
+        self.optical_start_button = self._button(buttons, text="Start", command=self.start_optical_capture, variant="primary")
+        self.optical_start_button.pack(side=LEFT, padx=(0, 8))
+        self.optical_stop_button = self._button(buttons, text="Stop", command=self.stop_optical_capture)
+        self.optical_stop_button.pack(side=LEFT)
+        self.optical_stop_button.configure(state="disabled")
+        self.optical_status_var = StringVar(value="Ready. HydraHarp and XDMA must be connected.")
+        self._label(body, "", textvariable=self.optical_status_var, wraplength=580, justify="left").pack(anchor="w")
+        window.protocol("WM_DELETE_WINDOW", self._close_optical_capture_window)
+
+    def _close_optical_capture_window(self):
+        if self.optical_capture_active:
+            self.stop_optical_capture()
+        else:
+            self.optical_capture_win.destroy()
+
+    def start_optical_capture(self):
+        if self.optical_capture_active:
+            return
+        if self.hydraharp is None:
+            messagebox.showerror("HH to QSFP", "HydraHarp is not connected.", parent=self.optical_capture_win)
+            return
+        if self.hydraharp_raw_recording or getattr(self, "qutag_timestamp_preparing_hydraharp", False) or getattr(self, "qutag_timestamp_writing", False):
+            messagebox.showerror("HH to QSFP", "Stop the TimeTag recording before starting optical capture.", parent=self.optical_capture_win)
+            return
         try:
-            hydraharp.exitAPI()
-        except Exception:
-            pass
+            duration_ms = int(round(float(self.optical_duration_var.get()) * 1000))
+            if not 1 <= duration_ms <= 3600000:
+                raise ValueError("Duration must be between 0.001 and 3600 seconds.")
+            output = Path(self.optical_output_var.get().strip()).expanduser()
+            if not output.name or output.suffix.lower() != ".bin":
+                raise ValueError("Choose a .bin output file.")
+            if output.exists():
+                raise FileExistsError(f"Output already exists: {output}")
+            if not output.parent.is_dir():
+                raise FileNotFoundError(f"Output directory does not exist: {output.parent}")
+            for device in ("/dev/xdma0_h2c_0", "/dev/xdma0_c2h_0"):
+                if not os.access(device, os.R_OK | os.W_OK):
+                    raise PermissionError(f"Cannot access {device}")
+        except (ValueError, OverflowError, OSError) as exc:
+            messagebox.showerror("HH to QSFP", str(exc), parent=self.optical_capture_win)
+            return
+
+        self.optical_capture_stop.clear()
+        self.optical_capture_active = True
+        self.hydraharp_raw_recording = True
+        self.optical_start_button.configure(state="disabled")
+        self.optical_stop_button.configure(state="normal")
+        self.optical_status_var.set("Stopping the live time trace before T2 capture...")
+        try:
+            self.hydraharp.timeTrace.stopMeasure()
+        except Exception as exc:
+            self.optical_capture_active = False
+            self.hydraharp_raw_recording = False
+            self.optical_start_button.configure(state="normal")
+            self.optical_stop_button.configure(state="disabled")
+            try:
+                self.hydraharp.timeTrace.measure(0, waitFinished=False, savePTU=False)
+            except Exception:
+                pass
+            messagebox.showerror("HH to QSFP", f"Could not stop the live trace: {exc}", parent=self.optical_capture_win)
+            return
+        # Let snAPI's time-trace worker finish before starting its raw worker.
+        self.root.after(1000, lambda: self._launch_optical_capture(duration_ms, output))
+
+    def _launch_optical_capture(self, duration_ms, output):
+        if not self.optical_capture_active:
+            return
+        if self.optical_capture_stop.is_set():
+            self._finish_optical_capture({"blocks": 0, "bytes": 0, "error": None})
+            return
+        self.optical_status_var.set("Capturing HH T2 records and checking QSFP loopback...")
+        self.optical_capture_thread = threading.Thread(
+            target=self._optical_capture_worker,
+            args=(duration_ms, output),
+            daemon=False,
+        )
+        try:
+            self.optical_capture_thread.start()
+        except Exception as exc:
+            self.optical_capture_thread = None
+            self._finish_optical_capture({"blocks": 0, "bytes": 0, "error": str(exc)})
+            return
+        self.root.after(100, self._poll_optical_capture)
+
+    def _optical_capture_worker(self, duration_ms, output):
+        blocks = None
+        count = 0
+        byte_count = 0
+        error = None
+        try:
+            with output.open("xb") as saved:
+                with OpticalLink(Path("/dev/xdma0_h2c_0"), Path("/dev/xdma0_c2h_0"), 10.0) as link:
+                    blocks = hydraharp_blocks(self.hydraharp, duration_ms, stop_event=self.optical_capture_stop)
+                    for payload in blocks:
+                        returned = link.exchange(payload)
+                        saved.write(returned)
+                        count += 1
+                        byte_count += len(returned)
+                        self.optical_capture_events.put(("progress", count, byte_count))
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            if blocks is not None:
+                try:
+                    blocks.close()
+                except Exception as exc:
+                    error = f"{error}; HH stop failed: {exc}" if error else f"HH stop failed: {exc}"
+            self.optical_capture_events.put(("done", {"blocks": count, "bytes": byte_count, "error": error, "path": output}))
+
+    def _poll_optical_capture(self):
+        result = None
+        while True:
+            try:
+                event = self.optical_capture_events.get_nowait()
+            except queue.Empty:
+                break
+            if event[0] == "progress":
+                _, count, byte_count = event
+                self.optical_status_var.set(f"Verified {count} blocks, {byte_count:,} raw T2 bytes returned.")
+            else:
+                result = event[1]
+        worker = self.optical_capture_thread
+        if result is not None:
+            self.optical_capture_result = result
+        if worker is not None and worker.is_alive():
+            self.root.after(100, self._poll_optical_capture)
+        elif self.optical_capture_active:
+            result = getattr(self, "optical_capture_result", {"blocks": 0, "bytes": 0, "error": "Capture ended unexpectedly."})
+            # snAPI can finish its native measurement thread just after
+            # stopMeasure() returns; give it time before starting timeTrace.
+            self.root.after(300, lambda: self._finish_optical_capture(result))
+
+    def _finish_optical_capture(self, result):
+        trace_error = None
+        if not self.optical_closing and self.hydraharp is not None:
+            try:
+                self.restart_hydraharp_time_trace()
+            except Exception as exc:
+                trace_error = str(exc)
+        self.hydraharp_raw_recording = False
+        self.optical_capture_active = False
+        self.optical_capture_thread = None
+        self.optical_start_button.configure(state="normal")
+        self.optical_stop_button.configure(state="disabled")
+        if "path" in result:
+            message = f"{result['blocks']} blocks, {result['bytes']:,} T2 bytes saved to {result['path']}."
+            self.optical_output_var.set(str(PROJECT_ROOT / f"hh_t2_returned_{datetime.now():%Y%m%d_%H%M%S_%f}.bin"))
+        else:
+            message = "Capture stopped before acquiring data."
+        if result.get("error"):
+            message += f" Capture error: {result['error']}"
+        if trace_error:
+            message += f" Live time trace could not restart: {trace_error}"
+        elif not self.optical_closing:
+            message += " Live time trace restarted."
+        self.optical_status_var.set(message)
+        self.tx_log_print("[HH → QSFP] " + message)
+
+    def stop_optical_capture(self):
+        if self.optical_capture_active:
+            self.optical_capture_stop.set()
+            self.optical_status_var.set("Stopping after the current block...")
 
     def apply_time_tagger_settings(self):
         if self.time_tagger is None:
@@ -1066,7 +1276,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
 
         self.tx_win = Toplevel(self.root)
         self.tx_win.title("TX Control Panel")
-        self._style_window(self.tx_win, minsize=(1200, 520))
+        self._style_window(self.tx_win, minsize=(1100, 400))
 
         shell = self._frame(self.tx_win)
         shell.pack(fill="both", expand=True, padx=18, pady=16)
@@ -1179,6 +1389,10 @@ class App(TxCommandsMixin, RxCommandsMixin):
         tx_toolbar_button(
             text="TimeTag",
             command=lambda: open_qutag_timestamp_window(self),
+        )
+        tx_toolbar_button(
+            text="HH → QSFP",
+            command=self.open_optical_capture_window,
         )
         tx_toolbar_button(
             text="Scan_WL",
@@ -1301,7 +1515,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
             plot_key = f"rx_{group_index}"
             plot_label = "Channels " + ",".join(str(channel) for channel in channel_group)
             self.rx_plot_labels[plot_key] = plot_label
-            self.rx_plot_redraw_enabled[plot_key] = True
+            self.rx_plot_redraw_enabled[plot_key] = False
 
             row, column = self.rx_grid_positions[group_index]
             panel = self._surface(content)
@@ -1344,7 +1558,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
         plot_key = "spd"
         spd_series = list(getattr(self, "spd_series", []))
         self.rx_plot_labels[plot_key] = "Single Photon Counts (per Time Tagger X bin)"
-        self.rx_plot_redraw_enabled[plot_key] = True
+        self.rx_plot_redraw_enabled[plot_key] = False
         row, column = 1, 1
         panel = self._surface(content)
         panel.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
@@ -1379,7 +1593,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
 
         plot_key = "hist"
         self.rx_plot_labels[plot_key] = self.qutag_hist_plot_label()
-        self.rx_plot_redraw_enabled[plot_key] = True
+        self.rx_plot_redraw_enabled[plot_key] = False
         row, column = 1, 2
         panel = self._surface(content)
         panel.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
@@ -1561,7 +1775,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self._label(frame, text="Redraw during stream", size=12, weight="bold").pack(anchor="w", pady=(0, 8))
 
         for plot_key, plot_label in self.rx_plot_labels.items():
-            var = BooleanVar(value=self.rx_plot_redraw_enabled.get(plot_key, True))
+            var = BooleanVar(value=self.rx_plot_redraw_enabled.get(plot_key, False))
             self.rx_plot_selector_vars[plot_key] = var
             self._checkbutton(
                 frame,
@@ -1716,6 +1930,23 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self.rx_plot_dirty = True
 
     def _quit_all(self):
+        self.optical_closing = True
+        if (
+            getattr(self, "qutag_timestamp_writing", False)
+            or getattr(self, "qutag_timestamp_preparing_hydraharp", False)
+            or getattr(self, "qutag_timestamp_hydraharp_recording", False)
+        ):
+            _stop_timestamp_writing(self)
+        if getattr(self, "qutag_timestamp_qsfp_active", False):
+            self.root.after(100, self._quit_all)
+            return
+        if self.optical_capture_active:
+            self.optical_capture_stop.set()
+            worker = self.optical_capture_thread
+            if worker is not None and worker.is_alive():
+                self.root.after(100, self._quit_all)
+                return
+            self.optical_capture_active = False
         try:
             self.rx_polling = False
         except Exception:

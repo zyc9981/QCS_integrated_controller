@@ -1,4 +1,5 @@
 import collections
+import os
 import subprocess
 import sys
 import threading
@@ -20,6 +21,8 @@ from tkinter import (
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+from optical_stream import OpticalLink, hydraharp_blocks
 
 
 TIMETAG_UI = {
@@ -216,9 +219,19 @@ def open_qutag_timestamp_window(app):
     app.qutag_timestamp_hydraharp_recording = False
     app.qutag_timestamp_hydraharp_ptu_path = None
     app.qutag_timestamp_hydraharp_h5_path = None
-    app.qutag_timestamp_hydraharp_conversion_running = False
+    conversion_running = getattr(app, "qutag_timestamp_hydraharp_conversion_running", False)
+    app.qutag_timestamp_hydraharp_conversion_running = conversion_running
     app.qutag_timestamp_hydraharp_warning = None
-    app.hydraharp_raw_recording = False
+    app.qutag_timestamp_qsfp_active = False
+    app.qutag_timestamp_qsfp_stopping = False
+    app.qutag_timestamp_qsfp_worker = None
+    if not conversion_running:
+        app.qutag_timestamp_qsfp_result = None
+    app.qutag_timestamp_qsfp_stop = threading.Event()
+    app.qutag_timestamp_qsfp_output = None
+    app.qutag_timestamp_close_pending = False
+    # This flag belongs to the shared HydraHarp, so opening the TimeTag
+    # window must not clear an optical capture already in progress.
     app.qutag_timestamp_streaming = True
     app.qutag_timestamp_history = collections.deque()
     app.qutag_timestamp_poll_interval_s = 0.1
@@ -340,6 +353,19 @@ def open_qutag_timestamp_window(app):
         fg=_ui(app)["muted"],
     ).pack(side="left")
 
+    qsfp_frame = _frame(app, app.qutag_timestamp_win)
+    qsfp_frame.pack(fill="x", padx=10, pady=(0, 6))
+    app.qutag_timestamp_qsfp_var = BooleanVar(value=False)
+    app.qutag_timestamp_qsfp_checkbox = _checkbutton(
+        app, qsfp_frame, text="QSFP", variable=app.qutag_timestamp_qsfp_var,
+    )
+    app.qutag_timestamp_qsfp_checkbox.pack(side="left")
+    _label(
+        app, qsfp_frame,
+        text="Send HydraHarp T2 records through the QSFP loopback while recording.",
+        fg=_ui(app)["muted"],
+    ).pack(side="left", padx=(8, 0))
+
     status_frame = _frame(app, app.qutag_timestamp_win)
     status_frame.pack(fill="x", padx=10, pady=(0, 6))
     app.qutag_timestamp_recording_var = StringVar(value="[REC] OFF")
@@ -363,13 +389,13 @@ def open_qutag_timestamp_window(app):
     info_status_frame = _frame(app, status_frame)
     info_status_frame.pack(anchor="w", fill="x")
     _label(app, info_status_frame, text="Info:", fg=_ui(app)["muted"]).pack(side="left")
-    app.qutag_timestamp_status_var = StringVar(
-        value=(
-            "Ready."
-            if app.qutag_timestamp_time_tagger_available
-            else "Time Tagger X unavailable. Trigger control only; recording disabled."
-        )
-    )
+    if not app.qutag_timestamp_time_tagger_available:
+        initial_status = "Time Tagger X unavailable. Trigger control only; recording disabled."
+    elif conversion_running:
+        initial_status = "HydraHarp H5 conversion is still running."
+    else:
+        initial_status = "Ready."
+    app.qutag_timestamp_status_var = StringVar(value=initial_status)
     _label(app, info_status_frame, textvariable=app.qutag_timestamp_status_var).pack(
         side="left", padx=(6, 0)
     )
@@ -615,10 +641,29 @@ def _normalize_timestamp_filename(filename):
 
 
 def _start_timestamp_writing(app):
+    if getattr(app, "optical_capture_active", False):
+        messagebox.showerror(
+            "Time Stamps",
+            "Stop the HH to QSFP capture before starting TimeTag recording.",
+            parent=app.qutag_timestamp_win,
+        )
+        return
+    if getattr(app, "hydraharp_raw_recording", False) and not getattr(app, "qutag_timestamp_writing", False):
+        messagebox.showerror(
+            "Time Stamps", "HydraHarp is finishing another raw capture. Wait for its live trace to resume.",
+            parent=app.qutag_timestamp_win,
+        )
+        return
     if (
         getattr(app, "qutag_timestamp_writing", False)
         or getattr(app, "qutag_timestamp_preparing_hydraharp", False)
     ):
+        return
+    if getattr(app, "qutag_timestamp_hydraharp_conversion_running", False):
+        messagebox.showerror(
+            "Time Stamps", "Wait for the previous HydraHarp H5 conversion to finish.",
+            parent=app.qutag_timestamp_win,
+        )
         return
 
     if getattr(app, "time_tagger", None) is None:
@@ -639,6 +684,23 @@ def _start_timestamp_writing(app):
         return
     filename = _normalize_timestamp_filename(raw_filename)
     app.qutag_timestamp_file_var.set(filename)
+    app.qutag_timestamp_qsfp_result = None
+    app.qutag_timestamp_stop_errors = []
+    qsfp_requested = bool(app.qutag_timestamp_qsfp_var.get())
+    hydraharp = getattr(app, "hydraharp", None)
+    qsfp_output = Path(filename).with_suffix(".qsfp.bin") if qsfp_requested else None
+    if qsfp_requested:
+        try:
+            if hydraharp is None:
+                raise RuntimeError("HydraHarp is not connected; QSFP needs HydraHarp T2 records.")
+            if qsfp_output.exists():
+                raise FileExistsError(f"QSFP output already exists: {qsfp_output}")
+            for device in ("/dev/xdma0_h2c_0", "/dev/xdma0_c2h_0"):
+                if not os.access(device, os.R_OK | os.W_OK):
+                    raise PermissionError(f"Cannot access {device}")
+        except (RuntimeError, OSError) as exc:
+            messagebox.showerror("Time Stamps", str(exc), parent=app.qutag_timestamp_win)
+            return
 
     if _timestamp_auto_stop_enabled(app):
         try:
@@ -666,7 +728,6 @@ def _start_timestamp_writing(app):
 
     app.qutag_timestamp_format = "ttbin"
 
-    hydraharp = getattr(app, "hydraharp", None)
     try:
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -687,9 +748,15 @@ def _start_timestamp_writing(app):
             Path(ptu_path).parent.mkdir(parents=True, exist_ok=True)
             # A time-trace and a raw TTTR measurement cannot run concurrently on
             # the HydraHarp.  Stop the live trace first, then allow its worker to
-            # finish before starting the disk-only T2 raw acquisition below.
+            # finish before starting the raw T2 acquisition below.
             hydraharp.timeTrace.stopMeasure()
         except Exception as exc:
+            if qsfp_requested:
+                messagebox.showerror(
+                    "Time Stamps", f"Cannot start QSFP recording: {exc}",
+                    parent=app.qutag_timestamp_win,
+                )
+                return
             # A connected-but-unusable HydraHarp must not prevent a valid
             # Time Tagger X-only recording.
             hydraharp_warning = f"HydraHarp skipped during preparation: {exc}"
@@ -700,6 +767,9 @@ def _start_timestamp_writing(app):
     app.qutag_timestamp_pending_filename = filename
     app.qutag_timestamp_hydraharp_ptu_path = ptu_path
     app.qutag_timestamp_hydraharp_warning = hydraharp_warning
+    app.qutag_timestamp_qsfp_requested = qsfp_requested
+    app.qutag_timestamp_qsfp_output = qsfp_output
+    app.qutag_timestamp_qsfp_checkbox.configure(state="disabled")
     if hydraharp is not None:
         app.qutag_timestamp_status_var.set("Preparing HydraHarp T2 TTTR recording...")
         app.qutag_timestamp_win.after(1000, lambda: _start_timestamp_recording(app))
@@ -716,6 +786,9 @@ def _start_timestamp_recording(app):
     window = getattr(app, "qutag_timestamp_win", None)
     if window is None or not window.winfo_exists():
         app.qutag_timestamp_preparing_hydraharp = False
+        if getattr(app, "hydraharp", None) is not None:
+            app.hydraharp_raw_recording = True
+            app.root.after(300, lambda: _resume_hydraharp_trace(app))
         return
 
     filename = getattr(app, "qutag_timestamp_pending_filename", None)
@@ -723,8 +796,13 @@ def _start_timestamp_recording(app):
     hydraharp = getattr(app, "hydraharp", None)
     hydraharp_warning = getattr(app, "qutag_timestamp_hydraharp_warning", None)
     use_hydraharp = hydraharp is not None and ptu_path is not None
+    qsfp_requested = bool(getattr(app, "qutag_timestamp_qsfp_requested", False))
     if not filename:
         app.qutag_timestamp_preparing_hydraharp = False
+        app.qutag_timestamp_qsfp_checkbox.configure(state="normal")
+        if hydraharp is not None:
+            app.hydraharp_raw_recording = True
+            app.root.after(300, lambda: _resume_hydraharp_trace(app))
         messagebox.showerror(
             "Time Stamps",
             "Time Tagger X recording preparation was incomplete.",
@@ -735,21 +813,28 @@ def _start_timestamp_recording(app):
     if use_hydraharp:
         try:
             hydraharp.setPTUFilePath(ptu_path)
-            started = hydraharp.raw.measure(0, 0, waitFinished=False, savePTU=True)
+            if qsfp_requested:
+                # Same practical maximum used by the live trace; Stop Writing
+                # ends the measurement at the requested time.
+                started = hydraharp.raw.startBlock(360000000, 1048576, savePTU=True)
+            else:
+                started = hydraharp.raw.measure(0, 0, waitFinished=False, savePTU=True)
             if not started:
-                raise RuntimeError("HydraHarp raw.measure returned False.")
+                raise RuntimeError("HydraHarp raw measurement could not start.")
             app.hydraharp_raw_recording = True
             app.qutag_timestamp_hydraharp_recording = True
         except Exception as exc:
+            if qsfp_requested:
+                app.qutag_timestamp_preparing_hydraharp = False
+                app.qutag_timestamp_qsfp_checkbox.configure(state="normal")
+                _stop_raw_and_resume_trace(app, hydraharp)
+                messagebox.showerror("Time Stamps", f"Could not start QSFP recording: {exc}", parent=window)
+                return
             # Preserve the usable Time Tagger X recording path if the optional
             # HydraHarp acquisition cannot start.
             hydraharp_warning = f"HydraHarp skipped at start: {exc}"
             app.qutag_timestamp_hydraharp_warning = hydraharp_warning
-            try:
-                hydraharp.raw.stopMeasure()
-            except Exception:
-                pass
-            app.hydraharp_raw_recording = False
+            _stop_raw_and_resume_trace(app, hydraharp)
             app.qutag_timestamp_hydraharp_recording = False
             app.qutag_timestamp_hydraharp_ptu_path = None
             use_hydraharp = False
@@ -760,19 +845,57 @@ def _start_timestamp_recording(app):
         app.time_tagger_file_writer = app.create_time_tagger_file_writer(filename, channels)
     except Exception as exc:
         if use_hydraharp:
-            try:
-                hydraharp.raw.stopMeasure()
-            except Exception:
-                pass
+            _stop_raw_and_resume_trace(app, hydraharp)
         app.qutag_timestamp_preparing_hydraharp = False
-        app.hydraharp_raw_recording = False
         app.qutag_timestamp_hydraharp_recording = False
+        app.qutag_timestamp_qsfp_checkbox.configure(state="normal")
         messagebox.showerror(
             "Time Stamps",
             f"Could not start Time Tagger X timestamp writing:\n{exc}",
             parent=window,
         )
         return
+
+    if qsfp_requested:
+        app.qutag_timestamp_qsfp_stop.clear()
+        app.qutag_timestamp_qsfp_result = None
+        app.qutag_timestamp_qsfp_count = 0
+        app.qutag_timestamp_qsfp_bytes = 0
+        app.qutag_timestamp_qsfp_displayed_count = 0
+        app.qutag_timestamp_qsfp_stopping = False
+        app.qutag_timestamp_qsfp_active = True
+        app.qutag_timestamp_qsfp_worker = threading.Thread(
+            target=_run_qsfp_stream,
+            args=(app, hydraharp, app.qutag_timestamp_qsfp_output),
+            daemon=False,
+        )
+        try:
+            app.qutag_timestamp_qsfp_worker.start()
+        except Exception as exc:
+            app.qutag_timestamp_qsfp_active = False
+            app.qutag_timestamp_qsfp_worker = None
+            cleanup_errors = []
+            try:
+                app.time_tagger_file_writer.stop()
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"Time Tagger X: {cleanup_exc}")
+            app.time_tagger_file_writer = None
+            try:
+                hydraharp.raw.stopMeasure()
+            except Exception as cleanup_exc:
+                cleanup_errors.append(f"HydraHarp: {cleanup_exc}")
+            app.hydraharp_raw_recording = True
+            app.qutag_timestamp_hydraharp_recording = False
+            app.qutag_timestamp_preparing_hydraharp = False
+            app.qutag_timestamp_qsfp_checkbox.configure(state="normal")
+            if not cleanup_errors:
+                app.root.after(300, lambda: _resume_hydraharp_trace(app))
+            detail = f"Could not start QSFP worker: {exc}"
+            if cleanup_errors:
+                detail += "\nCleanup errors: " + "; ".join(cleanup_errors)
+            messagebox.showerror("Time Stamps", detail, parent=window)
+            return
+        app.root.after(200, lambda: _poll_qsfp_stream(app))
 
     app.qutag_timestamp_preparing_hydraharp = False
     app.qutag_timestamp_writing = True
@@ -827,6 +950,7 @@ def _start_timestamp_recording(app):
         app.qutag_timestamp_status_var.set(
             "Software-aligned recording started. "
             f"Time Tagger X: {filename}; HydraHarp PTU: {ptu_path}"
+            + (f"; QSFP: {app.qutag_timestamp_qsfp_output}" if qsfp_requested else "")
         )
     else:
         warning_suffix = f" ({hydraharp_warning})" if hydraharp_warning else ""
@@ -834,6 +958,90 @@ def _start_timestamp_recording(app):
             f"Time Tagger X recording started: {filename}{warning_suffix}"
         )
     _poll_timestamp_file_size(app)
+
+
+def _run_qsfp_stream(app, hydraharp, output_path):
+    """Drain the TimeTag HydraHarp capture through the verified QSFP link."""
+    blocks = None
+    error = None
+    stop_error = None
+    count = 0
+    byte_count = 0
+    try:
+        with output_path.open("xb") as saved:
+            with OpticalLink(Path("/dev/xdma0_h2c_0"), Path("/dev/xdma0_c2h_0"), 10.0) as link:
+                blocks = hydraharp_blocks(
+                    hydraharp, 0, stop_event=app.qutag_timestamp_qsfp_stop,
+                    started=True,
+                )
+                for payload in blocks:
+                    returned = link.exchange(payload)
+                    saved.write(returned)
+                    count += 1
+                    byte_count += len(returned)
+                    app.qutag_timestamp_qsfp_count = count
+                    app.qutag_timestamp_qsfp_bytes = byte_count
+    except Exception as exc:
+        error = str(exc)
+    finally:
+        try:
+            if blocks is not None:
+                blocks.close()
+            else:
+                hydraharp.raw.stopMeasure()
+        except Exception as exc:
+            stop_error = str(exc)
+        app.qutag_timestamp_qsfp_result = {
+            "blocks": count,
+            "bytes": byte_count,
+            "error": error,
+            "stop_error": stop_error,
+            "path": output_path,
+        }
+
+
+def _poll_qsfp_stream(app):
+    worker = getattr(app, "qutag_timestamp_qsfp_worker", None)
+    if worker is None:
+        return
+    if worker.is_alive():
+        count = getattr(app, "qutag_timestamp_qsfp_count", 0)
+        if not getattr(app, "qutag_timestamp_qsfp_stopping", False) and count != getattr(app, "qutag_timestamp_qsfp_displayed_count", 0):
+            app.qutag_timestamp_qsfp_displayed_count = count
+            app.qutag_timestamp_status_var.set(
+                f"QSFP: {count} blocks, {app.qutag_timestamp_qsfp_bytes:,} T2 bytes verified."
+            )
+        app.root.after(200, lambda: _poll_qsfp_stream(app))
+    elif getattr(app, "qutag_timestamp_qsfp_active", False):
+        _stop_timestamp_writing(app)
+
+
+def _resume_hydraharp_trace(app):
+    if getattr(app, "optical_closing", False):
+        return
+    try:
+        app.restart_hydraharp_time_trace()
+    except Exception as exc:
+        message = f"HydraHarp live trace could not restart: {exc}"
+        app.qutag_timestamp_status_var.set(message)
+        app.tx_log_print("[TimeTag] " + message)
+    else:
+        app.tx_log_print("[TimeTag] HydraHarp live trace restarted.")
+    finally:
+        app.hydraharp_raw_recording = False
+
+
+def _stop_raw_and_resume_trace(app, hydraharp):
+    app.hydraharp_raw_recording = True
+    try:
+        hydraharp.raw.stopMeasure()
+    except Exception as exc:
+        message = f"HydraHarp raw measurement could not stop: {exc}"
+        app.qutag_timestamp_status_var.set(message)
+        app.tx_log_print("[TimeTag] " + message)
+        return False
+    app.root.after(300, lambda: _resume_hydraharp_trace(app))
+    return True
 
 
 def _stop_timestamp_writing(app):
@@ -858,7 +1066,7 @@ def _stop_timestamp_writing(app):
     if not (time_tagger_writing or hydraharp_recording or preparing_hydraharp):
         return
 
-    errors = []
+    errors = getattr(app, "qutag_timestamp_stop_errors", [])
     file_writer = getattr(app, "time_tagger_file_writer", None)
     if time_tagger_writing and file_writer is not None:
         try:
@@ -867,8 +1075,40 @@ def _stop_timestamp_writing(app):
             errors.append(f"Time Tagger X: {exc}")
     app.time_tagger_file_writer = None
 
+    qsfp_active = getattr(app, "qutag_timestamp_qsfp_active", False)
+    if qsfp_active:
+        worker = getattr(app, "qutag_timestamp_qsfp_worker", None)
+        if worker is not None and worker.is_alive():
+            app.qutag_timestamp_stop_errors = errors
+            app.qutag_timestamp_qsfp_stop.set()
+            app.qutag_timestamp_qsfp_stopping = True
+            app.qutag_timestamp_writing = False
+            app.qutag_timestamp_preparing_hydraharp = False
+            app.qutag_timestamp_size_poll_active = False
+            _set_timestamp_recording_indicator(app, False)
+            app.qutag_timestamp_status_var.set("Stopping QSFP and draining the final HydraHarp blocks...")
+            app.root.after(100, lambda: _stop_timestamp_writing(app))
+            return
+
     hydraharp_stop_succeeded = False
-    if hydraharp_recording:
+    if qsfp_active:
+        result = getattr(app, "qutag_timestamp_qsfp_result", None)
+        if result is None:
+            errors.append("QSFP worker ended without a result")
+        else:
+            hydraharp_stop_succeeded = not bool(result["stop_error"])
+            if result["stop_error"]:
+                errors.append(f"HydraHarp: {result['stop_error']}")
+            if result["error"]:
+                errors.append(f"QSFP: {result['error']}")
+            app.tx_log_print(
+                f"[TimeTag QSFP] {result['blocks']} blocks, {result['bytes']:,} "
+                f"returned T2 bytes: {result['path']}"
+            )
+        app.qutag_timestamp_qsfp_active = False
+        app.qutag_timestamp_qsfp_worker = None
+        app.qutag_timestamp_qsfp_stopping = False
+    elif hydraharp_recording:
         try:
             app.hydraharp.raw.stopMeasure()
             hydraharp_stop_succeeded = True
@@ -882,18 +1122,26 @@ def _stop_timestamp_writing(app):
     app.qutag_timestamp_writing = False
     app.qutag_timestamp_preparing_hydraharp = False
     app.qutag_timestamp_hydraharp_recording = False
-    app.hydraharp_raw_recording = False
+    resume_trace = (hydraharp_stop_succeeded or preparing_hydraharp) and getattr(app, "hydraharp", None) is not None
+    app.hydraharp_raw_recording = resume_trace or (hydraharp_recording and not hydraharp_stop_succeeded)
+    checkbox = getattr(app, "qutag_timestamp_qsfp_checkbox", None)
+    if checkbox is not None and checkbox.winfo_exists():
+        checkbox.configure(state="normal")
     app.qutag_timestamp_size_poll_active = False
     app.qutag_timestamp_start_monotonic = None
     app.qutag_timestamp_duration_limit_s = None
+    app.qutag_timestamp_stop_errors = []
     _set_timestamp_recording_indicator(app, False)
     if errors:
         app.qutag_timestamp_status_var.set("Recording stop completed with errors: " + "; ".join(errors))
-        messagebox.showerror(
-            "Time Stamps",
-            "Some recording stops reported errors:\n" + "\n".join(errors),
-            parent=app.qutag_timestamp_win,
-        )
+        if window is not None and window.winfo_exists() and not getattr(app, "optical_closing", False):
+            messagebox.showerror(
+                "Time Stamps",
+                "Some recording stops reported errors:\n" + "\n".join(errors),
+                parent=window,
+            )
+        else:
+            app.tx_log_print("[TimeTag] " + "; ".join(errors))
     else:
         app.qutag_timestamp_status_var.set(
             "Time Tagger X and HydraHarp recording stopped. Converting the HydraHarp PTU to H5..."
@@ -902,8 +1150,14 @@ def _stop_timestamp_writing(app):
         )
     _update_timestamp_file_size(app)
 
+    if resume_trace:
+        app.root.after(300, lambda: _resume_hydraharp_trace(app))
     if hydraharp_stop_succeeded:
         _start_hydraharp_h5_conversion(app)
+    if getattr(app, "qutag_timestamp_close_pending", False):
+        app.qutag_timestamp_close_pending = False
+        if window is not None and window.winfo_exists():
+            window.destroy()
 
 
 def _start_hydraharp_h5_conversion(app):
@@ -950,14 +1204,21 @@ def _run_hydraharp_h5_conversion(app, command, h5_path):
     except Exception as exc:
         message = f"HydraHarp PTU-to-H5 conversion failed: {exc}"
     else:
-        message = (
-            f"Recording saved. HydraHarp H5: {h5_path}. "
-            "Restart the program to resume the HydraHarp live count trace."
+        message = f"Recording saved. HydraHarp H5: {h5_path}."
+    qsfp_result = getattr(app, "qutag_timestamp_qsfp_result", None)
+    if qsfp_result is not None:
+        message += (
+            f" QSFP: {qsfp_result['blocks']} blocks, "
+            f"{qsfp_result['bytes']:,} T2 bytes verified in {qsfp_result['path']}."
         )
+        if qsfp_result["error"] or qsfp_result["stop_error"]:
+            message += " QSFP capture reported an error; see the TimeTag log."
 
-    window = getattr(app, "qutag_timestamp_win", None)
-    if window is not None and window.winfo_exists():
-        window.after(0, lambda: _finish_hydraharp_h5_conversion(app, message))
+    try:
+        app.root.after(0, lambda: _finish_hydraharp_h5_conversion(app, message))
+    except Exception:
+        app.qutag_timestamp_hydraharp_conversion_running = False
+        print(message)
 
 
 def _finish_hydraharp_h5_conversion(app, message):
@@ -1569,6 +1830,9 @@ def _close_timestamp_window(app):
         or getattr(app, "qutag_timestamp_preparing_hydraharp", False)
     ):
         _stop_timestamp_writing(app)
+        if getattr(app, "qutag_timestamp_qsfp_active", False):
+            app.qutag_timestamp_close_pending = True
+            return
     else:
         # A manually enabled gate must not be left running merely because the
         # TimeTag window is closed without a recording session.

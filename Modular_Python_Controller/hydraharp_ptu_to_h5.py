@@ -6,7 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from snAPI.Main import LibType, snAPI
+from picoquant_snapi import create_hydraharp_api
 
 
 def ptu_to_h5(ptu_filename, output_filename=None, chunk_size=1_000_000, compression="gzip"):
@@ -28,7 +28,7 @@ def ptu_to_h5(ptu_filename, output_filename=None, chunk_size=1_000_000, compress
     chunk_size = max(1, int(chunk_size))
     reader = None
     try:
-        reader = snAPI(libType=LibType.HH)
+        reader = create_hydraharp_api()
         if not reader.getFileDevice(str(ptu_path)):
             raise RuntimeError(f"snAPI could not open PTU file: {ptu_path}")
 
@@ -112,10 +112,7 @@ def ptu_to_h5(ptu_filename, output_filename=None, chunk_size=1_000_000, compress
                 reader.closeDevice()
             except Exception:
                 pass
-            try:
-                reader.exitAPI()
-            except Exception:
-                pass
+            # The installed Linux snAPI object releases its API in __del__.
 
 
 def _main():

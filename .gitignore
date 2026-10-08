@@ -33,3 +33,7 @@ __pycache__/
 # Calibration and generated logs
 automatic_calib_logs/
 *.log
+
+# Local FPGA project, Vivado outputs, and capture data
+/FPGA_HH_QSFP/
+/HH400-v3.x-Demos-master/
