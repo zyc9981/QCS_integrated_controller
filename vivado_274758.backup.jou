@@ -1,0 +1,24 @@
+#-----------------------------------------------------------
+# Vivado v2025.2 (64-bit)
+# SW Build 6299465 on Fri Nov 14 12:34:56 MST 2025
+# IP Build 6300035 on Fri Nov 14 10:48:45 MST 2025
+# SharedData Build 6298862 on Thu Nov 13 04:50:51 MST 2025
+# Start of session at: Thu Oct  8 21:57:36 2026
+# Process ID         : 274758
+# Current directory  : /home/zyc/QCS/QCS_integrated_controller
+# Command line       : vivado -mode batch -source /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/diagnostics/read_stream_diag.tcl
+# Log file           : /home/zyc/QCS/QCS_integrated_controller/vivado.log
+# Journal file       : /home/zyc/QCS/QCS_integrated_controller/vivado.jou
+# Running On         : qchip-1
+# Platform           : Ubuntu
+# Operating System   : Ubuntu 20.04.6 LTS
+# Processor Detail   : INTEL(R) XEON(R) SILVER 4509Y
+# CPU Frequency      : 900.000 MHz
+# CPU Physical cores : 16
+# CPU Logical cores  : 32
+# Host memory        : 67207 MB
+# Swap memory        : 8589 MB
+# Total Virtual      : 75797 MB
+# Available Virtual  : 71481 MB
+#-----------------------------------------------------------
+source /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/diagnostics/read_stream_diag.tcl

@@ -9,6 +9,9 @@ The output file contains raw little-endian 32-bit T2 records, not PTU headers.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
+import mmap
 import os
 from pathlib import Path
 import statistics
@@ -18,30 +21,53 @@ import time
 import zlib
 
 BLOCK_SIZE = 65536
+# BLOCK_SIZE = 4096
 HEADER = struct.Struct("<4sIII")
 MAGIC = b"HHQ1"
 PAYLOAD_SIZE = BLOCK_SIZE - HEADER.size
 
 
+# Use ordinary read/write syscalls with page-aligned, writable DMA buffers.
+# Keep the mmap and its exported pointer alive until the syscall completes.
+_libc = ctypes.CDLL(None, use_errno=True)
+for _name in ("read", "write"):
+    _function = getattr(_libc, _name)
+    _function.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
+    _function.restype = ctypes.c_ssize_t
+
+
+def _aligned_transfer(fd: int, size: int, data: bytes | None = None):
+    if size == 0:
+        return b"" if data is None else None
+    with mmap.mmap(-1, size) as buffer:
+        if data is not None:
+            buffer[:] = data
+        anchor = ctypes.c_char.from_buffer(buffer)
+        address = ctypes.addressof(anchor)
+        done = 0
+        function = _libc.read if data is None else _libc.write
+        try:
+            while done < size:
+                count = function(fd, address + done, size - done)
+                if count < 0:
+                    error = ctypes.get_errno()
+                    if error == errno.EINTR:
+                        continue
+                    raise OSError(error, os.strerror(error))
+                if count == 0:
+                    raise EOFError(f"XDMA made no progress with {size - done} bytes missing")
+                done += count
+            return buffer[:] if data is None else None
+        finally:
+            del anchor
+
+
 def _read_exact(fd: int, count: int) -> bytes:
-    chunks = []
-    remaining = count
-    while remaining:
-        chunk = os.read(fd, remaining)
-        if not chunk:
-            raise EOFError(f"XDMA C2H returned EOF with {remaining} bytes missing")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+    return _aligned_transfer(fd, count)
 
 
 def _write_all(fd: int, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
-        count = os.write(fd, view)
-        if count <= 0:
-            raise OSError("XDMA H2C made no progress")
-        view = view[count:]
+    _aligned_transfer(fd, len(data), data)
 
 
 def _packet(sequence: int, payload: bytes) -> bytes:
@@ -138,14 +164,29 @@ class OpticalLink:
         if not isinstance(received, bytes) or len(received) != BLOCK_SIZE:
             raise RuntimeError("C2H returned an incomplete block")
         magic, sequence, length, checksum = HEADER.unpack_from(received)
+        if received != expected:
+            bad_offsets = [
+                offset for offset, (sent, returned) in enumerate(zip(expected, received))
+                if sent != returned
+            ]
+            first_bad = bad_offsets[0]
+            details = (
+                f"Optical data mismatch on block {self.sequence}: "
+                f"{len(bad_offsets)} different bytes, first at {first_bad}, "
+                f"last at {bad_offsets[-1]}; "
+                f"first sent=0x{expected[first_bad]:02x}, "
+                f"returned=0x{received[first_bad]:02x}, "
+                f"XOR=0x{expected[first_bad] ^ received[first_bad]:02x}; "
+                f"returned header magic={magic!r}, sequence={sequence}, "
+                f"length={length}, CRC=0x{checksum:08x}; "
+                f"expected sequence={self.sequence}, length={len(payload)}, "
+                f"CRC=0x{zlib.crc32(payload):08x}"
+            )
+            if length <= PAYLOAD_SIZE:
+                actual_payload = received[HEADER.size : HEADER.size + length]
+                details += f"; returned payload CRC=0x{zlib.crc32(actual_payload):08x}"
+            raise ValueError(details)
         actual_payload = received[HEADER.size : HEADER.size + length]
-        if (magic, sequence, length, checksum) != (
-            MAGIC,
-            self.sequence,
-            len(payload),
-            zlib.crc32(actual_payload),
-        ) or actual_payload != payload or received != expected:
-            raise ValueError(f"Optical data mismatch on block {self.sequence}")
         self.sequence += 1
         return actual_payload
 
@@ -223,8 +264,13 @@ def _hydraharp_blocks(args):
 
 
 def main() -> None:
+    global BLOCK_SIZE, PAYLOAD_SIZE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", choices=("pattern", "hydraharp"))
+    parser.add_argument(
+        "--pattern-blocks", type=int, default=1, metavar="N",
+        help="send N numbered pattern blocks (default: 1)",
+    )
     parser.add_argument(
         "--thread-overhead-benchmark",
         type=int,
@@ -234,6 +280,10 @@ def main() -> None:
     parser.add_argument("--h2c", type=Path, default=Path("/dev/xdma0_h2c_0"))
     parser.add_argument("--c2h", type=Path, default=Path("/dev/xdma0_c2h_0"))
     parser.add_argument("--timeout", type=float, default=10)
+    parser.add_argument(
+        "--block-size", type=int, default=BLOCK_SIZE, metavar="BYTES",
+        help=f"full XDMA/Aurora block size in bytes (default: {BLOCK_SIZE})",
+    )
     parser.add_argument("--output", type=Path, help="write returned HH T2 records here")
     parser.add_argument("--duration-ms", type=int, default=10000)
     parser.add_argument("--poll-ms", type=int, default=10)
@@ -253,6 +303,8 @@ def main() -> None:
         return
     if args.source is None:
         parser.error("--source is required unless running --thread-overhead-benchmark")
+    if args.block_size <= HEADER.size or (args.block_size - HEADER.size) % 4:
+        parser.error("--block-size must exceed the header size and leave a payload divisible by 4")
     if args.source == "hydraharp" and args.output is None:
         parser.error("--source hydraharp requires --output")
     if (
@@ -260,11 +312,23 @@ def main() -> None:
         or args.poll_ms <= 0
         or args.buffer_records <= 0
         or args.timeout <= 0
+        or args.pattern_blocks <= 0
     ):
-        parser.error("duration, poll interval, buffer size, and timeout must be positive")
+        parser.error("duration, poll interval, buffer size, timeout, and pattern blocks must be positive")
+    if args.source == "hydraharp" and args.pattern_blocks != 1:
+        parser.error("--pattern-blocks is only for --source pattern")
+
+    # Keep the existing 64 KiB default, but allow smaller aligned packets to
+    # distinguish per-transfer failures from failures after a cumulative byte
+    # count. All stream helpers use these module-level sizes at runtime.
+    BLOCK_SIZE = args.block_size
+    PAYLOAD_SIZE = BLOCK_SIZE - HEADER.size
 
     blocks = (
-        [(bytes(range(256)) * ((PAYLOAD_SIZE + 255) // 256))[:PAYLOAD_SIZE]]
+        (
+            (bytes(range(256)) * ((PAYLOAD_SIZE + 255) // 256))[:PAYLOAD_SIZE]
+            for _ in range(args.pattern_blocks)
+        )
         if args.source == "pattern"
         else _hydraharp_blocks(args)
     )

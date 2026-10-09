@@ -991,6 +991,16 @@ def _run_qsfp_stream(app, hydraharp, output_path):
                 hydraharp.raw.stopMeasure()
         except Exception as exc:
             stop_error = str(exc)
+        if error or stop_error:
+            error_path = output_path.with_name(output_path.name + ".error.txt")
+            try:
+                error_path.write_text(
+                    f"Verified blocks: {count}\nVerified T2 bytes: {byte_count}\n"
+                    f"QSFP error: {error or 'none'}\nHydraHarp stop error: {stop_error or 'none'}\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         app.qutag_timestamp_qsfp_result = {
             "blocks": count,
             "bytes": byte_count,
@@ -1134,14 +1144,13 @@ def _stop_timestamp_writing(app):
     _set_timestamp_recording_indicator(app, False)
     if errors:
         app.qutag_timestamp_status_var.set("Recording stop completed with errors: " + "; ".join(errors))
+        app.tx_log_print("[TimeTag] " + "; ".join(errors))
         if window is not None and window.winfo_exists() and not getattr(app, "optical_closing", False):
             messagebox.showerror(
                 "Time Stamps",
                 "Some recording stops reported errors:\n" + "\n".join(errors),
                 parent=window,
             )
-        else:
-            app.tx_log_print("[TimeTag] " + "; ".join(errors))
     else:
         app.qutag_timestamp_status_var.set(
             "Time Tagger X and HydraHarp recording stopped. Converting the HydraHarp PTU to H5..."
