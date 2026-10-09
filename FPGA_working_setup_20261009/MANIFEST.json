@@ -1,0 +1,202 @@
+{
+  "created": "2026-10-09",
+  "repo_head": "97ff46aa1be652341bea9138192c9ac4984f3f23",
+  "working_tree_status": "?? FPGA_working_setup_20261009/\n",
+  "kernel": "5.15.0-138-generic",
+  "xdma_version": "2025.2.0",
+  "usb_quirk": "0e0d:0009:k",
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 24,
+      "sha256": "05ecf79a7ba6fb95a8ceb3cdc2f5a8402d391b4baa9260b5eb60c56cafb3ecc3",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2566,
+      "sha256": "9269ffacd887c951991e4c63bb44ad1de1ead9ae51362b731e258a5ebe98befd",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "STARTUP_COMMANDS.txt",
+      "bytes": 2022,
+      "sha256": "8f777b6b8e541428700b050dd1bd5a4cad266146303dbfa0cdd1a25634d46a04",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "bitstreams/hh_qsfp_top.bit",
+      "bytes": 80159239,
+      "sha256": "b91a9b7f34b7546fdf3068639f081e600c683ea23530be9bd3879343fc51fe8f",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/build/hh_qsfp.runs/impl_1/hh_qsfp_top.bit"
+    },
+    {
+      "path": "bitstreams/hh_qsfp_top.ltx",
+      "bytes": 4088,
+      "sha256": "a54524f2260eb9af740c56de25a4fde11697189fa119f41ef7af5acdc62642f0",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/build/hh_qsfp.runs/impl_1/hh_qsfp_top.ltx"
+    },
+    {
+      "path": "bitstreams/htg930_clock_probe.bit",
+      "bytes": 80159246,
+      "sha256": "d2d05d48e9255112094a9ab2d9cdc9133641fb71315d4d78a81d010fcd47c329",
+      "source": "/home/zyc/QSFP_test/QSFP_test/QSFP_test.runs/impl_1/htg930_clock_probe.bit"
+    },
+    {
+      "path": "bitstreams/htg930_clock_probe.ltx",
+      "bytes": 52633,
+      "sha256": "0c62e1bed5cf8a55b67b70945b5e19913467ce45bdf905fb6259e9698b321d8e",
+      "source": "/home/zyc/QSFP_test/QSFP_test/QSFP_test.runs/impl_1/htg930_clock_probe.ltx"
+    },
+    {
+      "path": "bitstreams/ibert_gty.bit",
+      "bytes": 80159258,
+      "sha256": "4c90f061cbe8939e643e5cbae9bef16d13745c9cd4e2ce44a942004e1bf640b1",
+      "source": "/home/zyc/htg930_bringup/archive_20261003_220516/programming/example_ibert_ultrascale_gty_0.bit"
+    },
+    {
+      "path": "bitstreams/pcie_fifo_loopback_top.bit",
+      "bytes": 80159250,
+      "sha256": "d2d571fb07a74b5f49d94f9716d1789c6a53e3f536eae13e6a82a40c00d96f02",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/build_pcie_fifo_loopback/pcie_fifo_loopback.runs/impl_1/pcie_fifo_loopback_top.bit"
+    },
+    {
+      "path": "bitstreams/vendor_pcie_gen3_x16_example.bit",
+      "bytes": 16089968,
+      "sha256": "357e0d3ea87d39d21f8de54760739d545fa3d1bac4a910a2535a40eadd09a85f",
+      "source": "/home/zyc/htg-extracted/reference_designs/reference_designs/HTG-930-VU9P/HTG-930-VUS9P_Bitstreams/HTG-930-VUS9P/Bitstreams/pcie_gen3_x16_example.bit"
+    },
+    {
+      "path": "clocks/CLOCK_AND_SWING_SETTINGS.md",
+      "bytes": 1551,
+      "sha256": "e4d802efa157bab00ba3e96f4862cafb1e8b2f80e68dcb2c8e87e3e11005220d",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "clocks/HTG930_U7_155M3087349-Registers.txt",
+      "bytes": 5798,
+      "sha256": "83fd0e1bcf57fca825f6911e87a33e196ddc2891824eb04f1a7a0b28112da91b",
+      "source": "/home/zyc/htg930_bringup/archive_20261003_220516/HTG930_U7_155M3087349-Registers.txt"
+    },
+    {
+      "path": "evidence/README.md",
+      "bytes": 2175,
+      "sha256": "b3acaf67afba5c8a91ab116e0df121c9ba0ad18e11bb0e3178470407e2274f68",
+      "source": "/home/zyc/htg930_bringup/swing_optimization_20261008/README.md"
+    },
+    {
+      "path": "evidence/final_all_lane_60s.csv",
+      "bytes": 627,
+      "sha256": "5aedda169a8a8f9320b6b10c781c004ba164646706e069df5ef1fe2d37ea2ffb",
+      "source": "/home/zyc/htg930_bringup/swing_optimization_20261008/final_all_lane_60s.csv"
+    },
+    {
+      "path": "evidence/test1_600s.qsfp.bin.error.txt",
+      "bytes": 669,
+      "sha256": "e5ad1d2d93a77de26b60abf097fd7cd411974bdb82d158a4b60de62ba814ca8f",
+      "source": "/home/zyc/QCS/20261008_QSFP_test/test1_600s.qsfp.bin.error.txt"
+    },
+    {
+      "path": "evidence/tx49_rx58_fine_20261008_200207.csv",
+      "bytes": 708,
+      "sha256": "77cf1e0750728796e99c47cff04898146b7c070e54bd6e0af1868650b0615cc3",
+      "source": "/home/zyc/htg930_bringup/swing_optimization_20261008/tx49_rx58_fine_20261008_200207.csv"
+    },
+    {
+      "path": "scripts/clear_stream_diag.tcl",
+      "bytes": 1617,
+      "sha256": "b280752052a95f343bd23681ef8ed31598d1bdc233ed1667f208561645e4590d",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "scripts/i2c_pages_control_i2c_40bit.tcl",
+      "bytes": 2837,
+      "sha256": "52df8ff4a6b4d829050a28ced81854ff6e2f4c1c093ce27d4f14ca7a9b3a3397",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "scripts/program_optical.tcl",
+      "bytes": 1131,
+      "sha256": "0634feddb37e19f04eec388a3921ef3e4bd56015e634bfc2e61190172e54803f",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "scripts/read_stream_diag.tcl",
+      "bytes": 2341,
+      "sha256": "7309754fc08bb53e27d8104ddb563ee7d1326b33a89b879fdcfcef1f000115ca",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "scripts/restore_u7_clocks.tcl",
+      "bytes": 4850,
+      "sha256": "49c5530cce3c0f1e1fe284051b7e59f9ddc0ead1ce4e42e5180fd515a794a0d8",
+      "source": "generated or adapted for this bundle"
+    },
+    {
+      "path": "source_snapshot/build_bitstream.tcl",
+      "bytes": 1604,
+      "sha256": "6e42988c1696fad5b5c043d194fb947a8c59ef65a8668fd250eda74910e20fb2",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/build_bitstream.tcl"
+    },
+    {
+      "path": "source_snapshot/constraints/htg930_pcie_fifo_loopback.xdc",
+      "bytes": 1772,
+      "sha256": "78b41bf0a223472e13f7eaab91a83510306aad7ee74f096971515a1aa484a8ec",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/constraints/htg930_pcie_fifo_loopback.xdc"
+    },
+    {
+      "path": "source_snapshot/constraints/htg930_qsfp_pcie.xdc",
+      "bytes": 2759,
+      "sha256": "66a3f54d1aac5870b9047da31b38d1c16c5f10f0d222d53678a35c1503c049cd",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/constraints/htg930_qsfp_pcie.xdc"
+    },
+    {
+      "path": "source_snapshot/create_project.tcl",
+      "bytes": 3851,
+      "sha256": "b1f636b13e1cedbb03297e783bb8b083a278e60324022443710bcac9c476cf8a",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/create_project.tcl"
+    },
+    {
+      "path": "source_snapshot/host/optical_stream.py",
+      "bytes": 19125,
+      "sha256": "ab441b5f76b56fb0e5be36eca87b838a0ba262f5f1d0bfc85192cd08850331e4",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/Modular_Python_Controller/optical_stream.py"
+    },
+    {
+      "path": "source_snapshot/host/picoquant_snapi.py",
+      "bytes": 1120,
+      "sha256": "ca08fe821270276a45452080b008329dd5e566fbce6cbc9878e1c20dd86abea0",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/Modular_Python_Controller/picoquant_snapi.py"
+    },
+    {
+      "path": "source_snapshot/host/python_controller.py",
+      "bytes": 82069,
+      "sha256": "c663bac38dff0bcde5f660a019215c2774dd780658cd1ec2cb382e52df7c4886",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/Modular_Python_Controller/python_controller.py"
+    },
+    {
+      "path": "source_snapshot/host/qutag_timestamp_helper.py",
+      "bytes": 71315,
+      "sha256": "ab105eaa66d63e077107a4d6dc6adb8947b7d40009ffc76108fc2ed1a40e1427",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/Modular_Python_Controller/qutag_timestamp_helper.py"
+    },
+    {
+      "path": "source_snapshot/rtl/hh_qsfp_top.v",
+      "bytes": 11187,
+      "sha256": "f7a2371c2286cefd6d52fd29e8b419ee763795dca0b7bfcd647597359bed7f45",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/rtl/hh_qsfp_top.v"
+    },
+    {
+      "path": "source_snapshot/rtl/pcie_fifo_loopback_top.v",
+      "bytes": 4280,
+      "sha256": "5817855b69b5dc9ac0a399a82a02902bfac40042fe24a10901128aa0a0a1332d",
+      "source": "/home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/rtl/pcie_fifo_loopback_top.v"
+    },
+    {
+      "path": "bitstreams/ibert_gty.ltx",
+      "bytes": 17585,
+      "sha256": "6e227a809a30d2ff0c309829c11345da2ba8ad9ddca7f61b15dfe5debb0e1319",
+      "source": "/home/zyc/htg930_bringup/archive_20261003_220516/programming/example_ibert_ultrascale_gty_0.ltx"
+    }
+  ]
+}
