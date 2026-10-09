@@ -22,7 +22,7 @@ from tkinter import (
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from optical_stream import OpticalLink, hydraharp_blocks
+from optical_stream import OpticalLink, hydraharp_blocks, capture_hh_qsfp
 
 
 TIMETAG_UI = {
@@ -961,52 +961,27 @@ def _start_timestamp_recording(app):
 
 
 def _run_qsfp_stream(app, hydraharp, output_path):
-    """Drain the TimeTag HydraHarp capture through the verified QSFP link."""
-    blocks = None
-    error = None
-    stop_error = None
-    count = 0
-    byte_count = 0
+    """Keep the HH capture running while recording QSFP verification errors."""
+    def progress(count, byte_count):
+        app.qutag_timestamp_qsfp_count = count
+        app.qutag_timestamp_qsfp_bytes = byte_count
+
     try:
-        with output_path.open("xb") as saved:
-            with OpticalLink(Path("/dev/xdma0_h2c_0"), Path("/dev/xdma0_c2h_0"), 10.0) as link:
-                blocks = hydraharp_blocks(
-                    hydraharp, 0, stop_event=app.qutag_timestamp_qsfp_stop,
-                    started=True,
-                )
-                for payload in blocks:
-                    returned = link.exchange(payload)
-                    saved.write(returned)
-                    count += 1
-                    byte_count += len(returned)
-                    app.qutag_timestamp_qsfp_count = count
-                    app.qutag_timestamp_qsfp_bytes = byte_count
+        app.qutag_timestamp_qsfp_result = capture_hh_qsfp(
+            hydraharp, 0, output_path, app.qutag_timestamp_qsfp_stop,
+            started=True, progress=progress,
+        )
     except Exception as exc:
-        error = str(exc)
-    finally:
+        # Includes file-creation failures before acquisition can be drained.
+        stop_error = None
         try:
-            if blocks is not None:
-                blocks.close()
-            else:
-                hydraharp.raw.stopMeasure()
-        except Exception as exc:
-            stop_error = str(exc)
-        if error or stop_error:
-            error_path = output_path.with_name(output_path.name + ".error.txt")
-            try:
-                error_path.write_text(
-                    f"Verified blocks: {count}\nVerified T2 bytes: {byte_count}\n"
-                    f"QSFP error: {error or 'none'}\nHydraHarp stop error: {stop_error or 'none'}\n",
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
+            hydraharp.raw.stopMeasure()
+        except Exception as stop_exc:
+            stop_error = str(stop_exc)
         app.qutag_timestamp_qsfp_result = {
-            "blocks": count,
-            "bytes": byte_count,
-            "error": error,
-            "stop_error": stop_error,
-            "path": output_path,
+            "blocks": app.qutag_timestamp_qsfp_count,
+            "bytes": app.qutag_timestamp_qsfp_bytes,
+            "error": str(exc), "stop_error": stop_error, "path": output_path,
         }
 
 
@@ -1115,6 +1090,11 @@ def _stop_timestamp_writing(app):
                 f"[TimeTag QSFP] {result['blocks']} blocks, {result['bytes']:,} "
                 f"returned T2 bytes: {result['path']}"
             )
+            if result.get("source_path"):
+                app.tx_log_print(
+                    f"[TimeTag QSFP] Original HH data: {result['source_path']}; "
+                    f"error log: {result['error_path']}"
+                )
         app.qutag_timestamp_qsfp_active = False
         app.qutag_timestamp_qsfp_worker = None
         app.qutag_timestamp_qsfp_stopping = False

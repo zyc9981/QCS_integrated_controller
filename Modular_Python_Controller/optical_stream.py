@@ -95,6 +95,14 @@ def _benchmark_thread_pair(iterations: int) -> None:
     print(f"  min/max: {min(samples) * 1000:.3f} / {max(samples) * 1000:.3f} ms per pair")
 
 
+class OpticalDataMismatch(ValueError):
+    """A completed transaction with corrupt returned bytes, safe to continue."""
+
+    def __init__(self, details, returned):
+        super().__init__(details)
+        self.returned = returned
+
+
 class OpticalLink:
     """One 64 KiB transaction at a time, with C2H posted before H2C."""
 
@@ -112,6 +120,7 @@ class OpticalLink:
             self.h2c_fd = os.open(self.h2c_path, os.O_WRONLY)
         except BaseException:
             os.close(self.c2h_fd)
+            self.c2h_fd = None
             raise
         return self
 
@@ -185,7 +194,8 @@ class OpticalLink:
             if length <= PAYLOAD_SIZE:
                 actual_payload = received[HEADER.size : HEADER.size + length]
                 details += f"; returned payload CRC=0x{zlib.crc32(actual_payload):08x}"
-            raise ValueError(details)
+            self.sequence += 1
+            raise OpticalDataMismatch(details, received[HEADER.size : HEADER.size + len(payload)])
         actual_payload = received[HEADER.size : HEADER.size + length]
         self.sequence += 1
         return actual_payload
@@ -231,6 +241,85 @@ def hydraharp_blocks(
     finally:
         if not stopped:
             hh.raw.stopMeasure()
+
+
+def capture_hh_qsfp(hh, duration_ms, output, stop_event, *, started=False, progress=None):
+    """Keep HH recording after QSFP failures; preserve original and returned data.
+
+    .source.bin contains every drained HH payload. The requested output contains
+    completed QSFP returns (including corrupt ones); the log identifies failures.
+    After a transport failure, stop submitting DMA and continue saving HH locally.
+    """
+    output = Path(output)
+    source_path = output.with_name(output.name + ".source.bin")
+    log_path = output.with_name(output.name + ".error.txt")
+    count = byte_count = captured_bytes = mismatch_count = 0
+    error = stop_error = None
+    blocks = None
+    link = OpticalLink(Path("/dev/xdma0_h2c_0"), Path("/dev/xdma0_c2h_0"), 10.0)
+    available = False
+    with output.open("xb") as saved, source_path.open("xb") as source, log_path.open("x", encoding="utf-8") as log:
+        def record(message):
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+            log.flush()
+
+        record(f"Original HH data: {source_path}; QSFP returned data: {output}")
+        try:
+            try:
+                link.__enter__()
+                available = True
+            except Exception as exc:
+                error = f"QSFP unavailable: {exc}"
+                record(error + "; continuing HH recording locally")
+            blocks = hydraharp_blocks(hh, duration_ms, stop_event=stop_event, started=started)
+            for capture_index, payload in enumerate(blocks):
+                source.write(payload)
+                captured_bytes += len(payload)
+                if available:
+                    try:
+                        returned = link.exchange(payload)
+                    except OpticalDataMismatch as exc:
+                        mismatch_count += 1
+                        record(f"Capture block {capture_index}, source offset {captured_bytes - len(payload)}: {exc}")
+                        saved.write(exc.returned)
+                    except Exception as exc:
+                        error = f"QSFP transport failure on capture block {capture_index}: {exc}"
+                        record(error + "; disabling QSFP transfers and continuing HH locally")
+                        available = False
+                    else:
+                        saved.write(returned)
+                        count += 1
+                        byte_count += len(returned)
+                if progress is not None:
+                    progress(count, byte_count)
+        except Exception as exc:
+            error = f"{error}; capture failure: {exc}" if error else f"Capture failure: {exc}"
+            record(error)
+        finally:
+            try:
+                if blocks is not None:
+                    blocks.close()
+                else:
+                    hh.raw.stopMeasure()
+            except Exception as exc:
+                stop_error = str(exc)
+                record(f"HydraHarp stop error: {exc}")
+            try:
+                link.__exit__()
+            except Exception as exc:
+                error = f"{error}; QSFP close: {exc}" if error else f"QSFP close: {exc}"
+                record(error)
+            record(f"Verified blocks: {count}; verified T2 bytes: {byte_count}; "
+                   f"mismatched blocks: {mismatch_count}; original HH bytes saved: {captured_bytes}")
+    if mismatch_count:
+        summary = f"{mismatch_count} mismatched QSFP blocks (capture continued)"
+        error = f"{summary}; {error}" if error else summary
+    if error or stop_error:
+        error = f"{error or 'HydraHarp stop failed'}; log: {log_path}"
+    return {"blocks": count, "bytes": byte_count, "error": error,
+            "stop_error": stop_error, "path": output, "source_path": source_path,
+            "error_path": log_path, "mismatches": mismatch_count,
+            "captured_bytes": captured_bytes}
 
 
 def _hydraharp_blocks(args):

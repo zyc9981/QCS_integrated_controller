@@ -11,7 +11,7 @@ import numpy as np
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-from optical_stream import OpticalLink, hydraharp_blocks
+from optical_stream import OpticalLink, hydraharp_blocks, capture_hh_qsfp
 
 from tkinter import (
     Tk,
@@ -625,29 +625,16 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self.root.after(100, self._poll_optical_capture)
 
     def _optical_capture_worker(self, duration_ms, output):
-        blocks = None
-        count = 0
-        byte_count = 0
-        error = None
         try:
-            with output.open("xb") as saved:
-                with OpticalLink(Path("/dev/xdma0_h2c_0"), Path("/dev/xdma0_c2h_0"), 10.0) as link:
-                    blocks = hydraharp_blocks(self.hydraharp, duration_ms, stop_event=self.optical_capture_stop)
-                    for payload in blocks:
-                        returned = link.exchange(payload)
-                        saved.write(returned)
-                        count += 1
-                        byte_count += len(returned)
-                        self.optical_capture_events.put(("progress", count, byte_count))
+            result = capture_hh_qsfp(
+                self.hydraharp, duration_ms, output, self.optical_capture_stop,
+                progress=lambda count, byte_count: self.optical_capture_events.put(
+                    ("progress", count, byte_count)
+                ),
+            )
         except Exception as exc:
-            error = str(exc)
-        finally:
-            if blocks is not None:
-                try:
-                    blocks.close()
-                except Exception as exc:
-                    error = f"{error}; HH stop failed: {exc}" if error else f"HH stop failed: {exc}"
-            self.optical_capture_events.put(("done", {"blocks": count, "bytes": byte_count, "error": error, "path": output}))
+            result = {"blocks": 0, "bytes": 0, "error": str(exc), "path": output}
+        self.optical_capture_events.put(("done", result))
 
     def _poll_optical_capture(self):
         result = None
@@ -691,6 +678,8 @@ class App(TxCommandsMixin, RxCommandsMixin):
             message = "Capture stopped before acquiring data."
         if result.get("error"):
             message += f" Capture error: {result['error']}"
+        if result.get("source_path"):
+            message += f" Original HH data: {result['source_path']}. Log: {result['error_path']}."
         if trace_error:
             message += f" Live time trace could not restart: {trace_error}"
         elif not self.optical_closing:
