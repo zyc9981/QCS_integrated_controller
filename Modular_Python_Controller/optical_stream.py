@@ -9,6 +9,7 @@ The output file contains raw little-endian 32-bit T2 records, not PTU headers.
 from __future__ import annotations
 
 import argparse
+import csv
 import ctypes
 import errno
 import mmap
@@ -36,30 +37,50 @@ for _name in ("read", "write"):
     _function.restype = ctypes.c_ssize_t
 
 
-def _aligned_transfer(fd: int, size: int, data: bytes | None = None):
+def _aligned_transfer(fd: int, size: int, data: bytes | None = None, *, timing=None):
     if size == 0:
         return b"" if data is None else None
-    with mmap.mmap(-1, size) as buffer:
-        if data is not None:
-            buffer[:] = data
-        anchor = ctypes.c_char.from_buffer(buffer)
-        address = ctypes.addressof(anchor)
-        done = 0
-        function = _libc.read if data is None else _libc.write
-        try:
-            while done < size:
-                count = function(fd, address + done, size - done)
-                if count < 0:
-                    error = ctypes.get_errno()
-                    if error == errno.EINTR:
-                        continue
-                    raise OSError(error, os.strerror(error))
-                if count == 0:
-                    raise EOFError(f"XDMA made no progress with {size - done} bytes missing")
-                done += count
-            return buffer[:] if data is None else None
-        finally:
-            del anchor
+    started = time.perf_counter() if timing is not None else 0
+    calls = []
+    try:
+        with mmap.mmap(-1, size) as buffer:
+            if data is not None:
+                buffer[:] = data
+            anchor = ctypes.c_char.from_buffer(buffer)
+            address = ctypes.addressof(anchor)
+            done = 0
+            function = _libc.read if data is None else _libc.write
+            if timing is not None:
+                prepared = time.perf_counter()
+                timing["buffer_prepare_s"] = prepared - started
+            try:
+                while done < size:
+                    if timing is not None:
+                        before = time.perf_counter()
+                    count = function(fd, address + done, size - done)
+                    if timing is not None:
+                        calls.append((before, time.perf_counter()))
+                    if count < 0:
+                        error = ctypes.get_errno()
+                        if error == errno.EINTR:
+                            continue
+                        raise OSError(error, os.strerror(error))
+                    if count == 0:
+                        raise EOFError(f"XDMA made no progress with {size - done} bytes missing")
+                    done += count
+                if timing is not None:
+                    before = time.perf_counter()
+                returned = buffer[:] if data is None else None
+                if timing is not None:
+                    timing["result_copy_s"] = time.perf_counter() - before
+                return returned
+            finally:
+                del anchor
+    finally:
+        if timing is not None:
+            timing["total_s"] = time.perf_counter() - started
+            timing["syscall_s"] = sum(end - begin for begin, end in calls)
+            timing["calls"] = calls
 
 
 def _read_exact(fd: int, count: int) -> bytes:
@@ -95,6 +116,54 @@ def _benchmark_thread_pair(iterations: int) -> None:
     print(f"  min/max: {min(samples) * 1000:.3f} / {max(samples) * 1000:.3f} ms per pair")
 
 
+def _profile_report(rows, wall_s, open_s, csv_path):
+    if csv_path is not None and rows:
+        fields = list(dict.fromkeys(key for row in rows for key in row))
+        with csv_path.open("x", newline="") as output:
+            writer = csv.DictWriter(output, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"Per-block timings (seconds): {csv_path}")
+    if not rows:
+        return
+    completed = [row for row in rows if row["status"] == "ok"]
+    print(f"Pattern profile: {len(completed)}/{len(rows)} blocks verified; "
+          f"block size={BLOCK_SIZE} bytes")
+    print(f"Device open: {open_s * 1000:.3f} ms (once per run)")
+    print(f"{'Stage':<36} {'mean ms':>10} {'median ms':>10} {'p95 ms':>10}")
+    stages = (
+        ("source_prepare_s", "Pattern generation"),
+        ("packet_prepare_s", "Header/CRC/packet preparation"),
+        ("workers_s", "Workers + DMA, wall time"),
+        ("syscall_union_s", "  At least one DMA syscall active"),
+        ("outside_syscalls_s", "  Remaining worker wall time"),
+        ("verify_s", "Verification + payload extraction"),
+        ("exchange_s", "Complete exchange"),
+        ("reader_launch_s", "Reader create/start/ready wait *"),
+        ("writer_launch_s", "Writer create/start *"),
+        ("h2c_buffer_prepare_s", "H2C allocation/copy/pointer *"),
+        ("c2h_buffer_prepare_s", "C2H allocation/pointer *"),
+        ("h2c_syscall_s", "H2C blocking write *"),
+        ("c2h_syscall_s", "C2H blocking read *"),
+        ("c2h_result_copy_s", "C2H copy to Python bytes *"),
+        ("syscall_overlap_s", "Read/write syscall overlap *"),
+    )
+    for key, label in stages:
+        values = sorted(row[key] * 1000 for row in rows if key in row)
+        if values:
+            p95 = values[min(len(values) - 1, (95 * len(values) + 99) // 100 - 1)]
+            print(f"{label:<36} {statistics.mean(values):10.4f} "
+                  f"{statistics.median(values):10.4f} {p95:10.4f}")
+    payload_bytes = sum(row["payload_bytes"] for row in completed)
+    exchange_s = sum(row["exchange_s"] for row in rows)
+    print(f"Payload throughput: {payload_bytes / wall_s / 1e6:.2f} MB/s over "
+          f"{wall_s:.3f} s of the loop; {payload_bytes / exchange_s / 1e6:.2f} "
+          "MB/s over exchange calls")
+    print("* Overlapping diagnostics: do not add these rows. DMA syscall time "
+          "includes driver/hardware waits, scheduling and Python resumption; "
+          "it is not pure PCIe or optical transfer time.")
+
+
 class OpticalDataMismatch(ValueError):
     """A completed transaction with corrupt returned bytes, safe to continue."""
 
@@ -106,13 +175,15 @@ class OpticalDataMismatch(ValueError):
 class OpticalLink:
     """One 64 KiB transaction at a time, with C2H posted before H2C."""
 
-    def __init__(self, h2c: Path, c2h: Path, timeout: float):
+    def __init__(self, h2c: Path, c2h: Path, timeout: float, *, profile=False):
         self.h2c_path = h2c
         self.c2h_path = c2h
         self.timeout = timeout
         self.h2c_fd: int | None = None
         self.c2h_fd: int | None = None
         self.sequence = 0
+        self.profile = profile
+        self.last_profile = None
 
     def __enter__(self):
         self.c2h_fd = os.open(self.c2h_path, os.O_RDONLY)
@@ -131,9 +202,32 @@ class OpticalLink:
             os.close(self.c2h_fd)
 
     def exchange(self, payload: bytes) -> bytes:
+        if not self.profile:
+            return self._exchange(payload)
+        timing = {"block": self.sequence, "payload_bytes": len(payload)}
+        started = time.perf_counter()
+        try:
+            returned = self._exchange(payload, timing)
+            timing["status"] = "ok"
+            return returned
+        except BaseException as exc:
+            timing["status"] = type(exc).__name__
+            raise
+        finally:
+            timing["exchange_s"] = time.perf_counter() - started
+            self.last_profile = timing
+
+    def _exchange(self, payload: bytes, timing=None) -> bytes:
         if self.h2c_fd is None or self.c2h_fd is None:
             raise RuntimeError("XDMA devices are not open")
+        if timing is not None:
+            started = time.perf_counter()
         expected = _packet(self.sequence, payload)
+        if timing is not None:
+            timing["packet_prepare_s"] = time.perf_counter() - started
+            workers_started = time.perf_counter()
+        read_timing = {} if timing is not None else None
+        write_timing = {} if timing is not None else None
         result: dict[str, bytes | BaseException] = {}
         ready = threading.Event()
         deadline = time.monotonic() + self.timeout
@@ -141,24 +235,35 @@ class OpticalLink:
         def receiver():
             ready.set()
             try:
-                result["data"] = _read_exact(self.c2h_fd, BLOCK_SIZE)
+                result["data"] = (
+                    _read_exact(self.c2h_fd, BLOCK_SIZE) if timing is None else
+                    _aligned_transfer(self.c2h_fd, BLOCK_SIZE, timing=read_timing)
+                )
             except BaseException as exc:
                 result["error"] = exc
 
         reader = threading.Thread(target=receiver, daemon=True)
         reader.start()
         ready.wait()
+        if timing is not None:
+            reader_launched = time.perf_counter()
+            timing["reader_launch_s"] = reader_launched - workers_started
         # One complete block fits in the RX FIFO even if the kernel has not
         # submitted the C2H descriptor by the time H2C starts.
 
         def sender():
             try:
-                _write_all(self.h2c_fd, expected)
+                if timing is None:
+                    _write_all(self.h2c_fd, expected)
+                else:
+                    _aligned_transfer(self.h2c_fd, len(expected), expected, timing=write_timing)
             except BaseException as exc:
                 result["write_error"] = exc
 
         writer = threading.Thread(target=sender, daemon=True)
         writer.start()
+        if timing is not None:
+            timing["writer_launch_s"] = time.perf_counter() - reader_launched
         writer.join(max(0, deadline - time.monotonic()))
         if writer.is_alive():
             raise TimeoutError("H2C write stalled; check PCIe and both Aurora links")
@@ -169,7 +274,34 @@ class OpticalLink:
             raise TimeoutError("No C2H block returned; check PCIe and both Aurora links")
         if "error" in result:
             raise RuntimeError("XDMA C2H read failed") from result["error"]
-        received = result["data"]
+        if timing is not None:
+            workers_finished = time.perf_counter()
+            timing["workers_s"] = workers_finished - workers_started
+            intervals = sorted(read_timing["calls"] + write_timing["calls"])
+            union = 0.0
+            end = 0.0
+            for begin, finish in intervals:
+                union += max(0.0, finish - max(begin, end))
+                end = max(end, finish)
+            timing["syscall_union_s"] = union
+            timing["outside_syscalls_s"] = max(0.0, timing["workers_s"] - union)
+            for prefix, values in (("h2c", write_timing), ("c2h", read_timing)):
+                for name in ("buffer_prepare_s", "syscall_s", "result_copy_s", "total_s"):
+                    timing[f"{prefix}_{name}"] = values[name]
+                timing[f"{prefix}_syscall_count"] = len(values["calls"])
+                timing[f"{prefix}_syscall_start_s"] = values["calls"][0][0] - workers_started
+                timing[f"{prefix}_syscall_end_s"] = values["calls"][-1][1] - workers_started
+            timing["syscall_overlap_s"] = (
+                read_timing["syscall_s"] + write_timing["syscall_s"] - union
+            )
+            verification_started = time.perf_counter()
+        try:
+            return self._verify(payload, expected, result["data"])
+        finally:
+            if timing is not None:
+                timing["verify_s"] = time.perf_counter() - verification_started
+
+    def _verify(self, payload, expected, received):
         if not isinstance(received, bytes) or len(received) != BLOCK_SIZE:
             raise RuntimeError("C2H returned an incomplete block")
         magic, sequence, length, checksum = HEADER.unpack_from(received)
@@ -366,6 +498,15 @@ def main() -> None:
         metavar="N",
         help="benchmark N no-I/O reader/writer thread pairs, then exit",
     )
+    parser.add_argument(
+        "--profile", action="store_true",
+        help="measure pattern exchange stages and print a summary instead of per-block lines",
+    )
+    parser.add_argument(
+        "--profile-csv", type=Path,
+        help="save per-block timings to a new CSV file (requires --profile)",
+    )
+    parser.add_argument("--quiet", action="store_true", help="omit per-block success lines")
     parser.add_argument("--h2c", type=Path, default=Path("/dev/xdma0_h2c_0"))
     parser.add_argument("--c2h", type=Path, default=Path("/dev/xdma0_c2h_0"))
     parser.add_argument("--timeout", type=float, default=10)
@@ -383,6 +524,12 @@ def main() -> None:
         default=Path(__file__).with_name("HH.ini"),
     )
     args = parser.parse_args()
+    if args.profile_csv is not None and not args.profile:
+        parser.error("--profile-csv requires --profile")
+    if args.profile and (args.source != "pattern" or args.thread_overhead_benchmark is not None):
+        parser.error("--profile requires --source pattern")
+    if args.profile_csv is not None and args.profile_csv.exists():
+        parser.error("--profile-csv must name a new file")
     if args.thread_overhead_benchmark is not None:
         if args.thread_overhead_benchmark <= 0:
             parser.error("--thread-overhead-benchmark must be positive")
@@ -421,29 +568,44 @@ def main() -> None:
         if args.source == "pattern"
         else _hydraharp_blocks(args)
     )
-    with OpticalLink(args.h2c, args.c2h, args.timeout) as link:
-        if args.output is None:
-            for block in blocks:
+    rows = []
+    open_started = time.perf_counter()
+    with OpticalLink(args.h2c, args.c2h, args.timeout, profile=args.profile) as link:
+        open_s = time.perf_counter() - open_started
+        output = args.output.open("wb") if args.output is not None else None
+        loop_started = time.perf_counter()
+        try:
+            while True:
+                source_started = time.perf_counter() if args.profile else 0
+                try:
+                    block = next(blocks)
+                except StopIteration:
+                    break
+                if args.profile:
+                    source_s = time.perf_counter() - source_started
                 started = time.perf_counter()
-                link.exchange(block)
-                elapsed = time.perf_counter() - started
-                rate = len(block) / elapsed / 1_000_000
-                print(
-                    f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
-                    f"exchange={elapsed * 1000:.3f} ms, payload_rate={rate:.2f} MB/s"
-                )
-        else:
-            with args.output.open("wb") as output:
-                for block in blocks:
-                    started = time.perf_counter()
+                try:
                     returned = link.exchange(block)
-                    elapsed = time.perf_counter() - started
+                finally:
+                    if args.profile and link.last_profile is not None:
+                        row = dict(link.last_profile)
+                        row["source_prepare_s"] = source_s
+                        rows.append(row)
+                elapsed = time.perf_counter() - started
+                if output is not None:
                     output.write(returned)
+                if not (args.quiet or args.profile):
                     rate = len(block) / elapsed / 1_000_000
                     print(
                         f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
                         f"exchange={elapsed * 1000:.3f} ms, payload_rate={rate:.2f} MB/s"
                     )
+        finally:
+            wall_s = time.perf_counter() - loop_started
+            if output is not None:
+                output.close()
+            if args.profile:
+                _profile_report(rows, wall_s, open_s, args.profile_csv)
     print(f"Finished: {link.sequence} blocks")
 
 
