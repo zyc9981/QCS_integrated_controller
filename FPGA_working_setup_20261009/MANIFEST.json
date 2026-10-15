@@ -14,14 +14,14 @@
     },
     {
       "path": "README.md",
-      "bytes": 2566,
-      "sha256": "9269ffacd887c951991e4c63bb44ad1de1ead9ae51362b731e258a5ebe98befd",
+      "bytes": 3546,
+      "sha256": "a017ef198eb2cf7f37978c693ddecd1fc909e74027a153fe71a9649bd997bb90",
       "source": "generated or adapted for this bundle"
     },
     {
       "path": "STARTUP_COMMANDS.txt",
-      "bytes": 2022,
-      "sha256": "8f777b6b8e541428700b050dd1bd5a4cad266146303dbfa0cdd1a25634d46a04",
+      "bytes": 7033,
+      "sha256": "095189c4ae99c966fa278209ce2ef7e71956447026cd372615a881bd1575d276",
       "source": "generated or adapted for this bundle"
     },
     {
@@ -198,5 +198,6 @@
       "sha256": "6e227a809a30d2ff0c309829c11345da2ba8ad9ddca7f61b15dfe5debb0e1319",
       "source": "/home/zyc/htg930_bringup/archive_20261003_220516/programming/example_ibert_ultrascale_gty_0.ltx"
     }
-  ]
+  ],
+  "startup_instructions_updated": "2026-10-14"
 }

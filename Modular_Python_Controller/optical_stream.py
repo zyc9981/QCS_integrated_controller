@@ -4,17 +4,22 @@
 This program needs a loaded hh_qsfp bitstream and Xilinx's XDMA Linux driver.
 It owns the HydraHarp during --source hydraharp; close other HH applications.
 The output file contains raw little-endian 32-bit T2 records, not PTU headers.
+CLI streams log completed-block mismatches and continue; transport failures stop
+the stream. A run containing mismatches exits with status 1 after completion.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import csv
 import ctypes
 import errno
+import json
 import mmap
 import os
 from pathlib import Path
+import queue
 import statistics
 import struct
 import threading
@@ -26,6 +31,50 @@ BLOCK_SIZE = 65536
 HEADER = struct.Struct("<4sIII")
 MAGIC = b"HHQ1"
 PAYLOAD_SIZE = BLOCK_SIZE - HEADER.size
+RX_FIFO_BYTES = 128 * 1024
+
+
+class CpuIdleLatency:
+    """Hold an optional, system-wide CPU idle-latency request during streaming.
+
+    None leaves the existing policy alone. Linux combines active requests, and
+    closing this descriptor removes only this request. The frequency governor
+    and persistent system configuration are not changed.
+    """
+
+    def __init__(self, latency_us=None):
+        if latency_us is not None and not 0 <= latency_us <= 2147483647:
+            raise ValueError("CPU idle latency must be between 0 and 2147483647 us")
+        self.latency_us = latency_us
+        self.fd = None
+
+    def __enter__(self):
+        if self.latency_us is None:
+            return self
+        if self.fd is not None:
+            raise RuntimeError("CPU idle-latency request is already active")
+        try:
+            self.fd = os.open("/dev/cpu_dma_latency", os.O_RDWR | os.O_CLOEXEC)
+        except PermissionError as exc:
+            raise PermissionError(
+                exc.errno,
+                "Low latency requires read/write access to /dev/cpu_dma_latency; "
+                "grant this user access, then rerun as the normal user",
+                "/dev/cpu_dma_latency",
+            ) from exc
+        try:
+            request = struct.pack("=i", self.latency_us)
+            if os.write(self.fd, request) != len(request):
+                raise OSError("CPU idle-latency request was not fully written")
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *_):
+        if self.fd is not None:
+            fd, self.fd = self.fd, None
+            os.close(fd)
 
 
 # Use ordinary read/write syscalls with page-aligned, writable DMA buffers.
@@ -129,7 +178,7 @@ def _profile_report(rows, wall_s, open_s, csv_path):
     completed = [row for row in rows if row["status"] == "ok"]
     print(f"Pattern profile: {len(completed)}/{len(rows)} blocks verified; "
           f"block size={BLOCK_SIZE} bytes")
-    print(f"Device open: {open_s * 1000:.3f} ms (once per run)")
+    print(f"Link/buffer/worker setup: {open_s * 1000:.3f} ms (once per run)")
     print(f"{'Stage':<36} {'mean ms':>10} {'median ms':>10} {'p95 ms':>10}")
     stages = (
         ("source_prepare_s", "Pattern generation"),
@@ -139,10 +188,10 @@ def _profile_report(rows, wall_s, open_s, csv_path):
         ("outside_syscalls_s", "  Remaining worker wall time"),
         ("verify_s", "Verification + payload extraction"),
         ("exchange_s", "Complete exchange"),
-        ("reader_launch_s", "Reader create/start/ready wait *"),
-        ("writer_launch_s", "Writer create/start *"),
-        ("h2c_buffer_prepare_s", "H2C allocation/copy/pointer *"),
-        ("c2h_buffer_prepare_s", "C2H allocation/pointer *"),
+        ("reader_launch_s", "Reader launch/dispatch/ready wait *"),
+        ("writer_launch_s", "Writer launch/dispatch *"),
+        ("h2c_buffer_prepare_s", "H2C buffer preparation *"),
+        ("c2h_buffer_prepare_s", "C2H buffer preparation *"),
         ("h2c_syscall_s", "H2C blocking write *"),
         ("c2h_syscall_s", "C2H blocking read *"),
         ("c2h_result_copy_s", "C2H copy to Python bytes *"),
@@ -157,8 +206,11 @@ def _profile_report(rows, wall_s, open_s, csv_path):
     payload_bytes = sum(row["payload_bytes"] for row in completed)
     exchange_s = sum(row["exchange_s"] for row in rows)
     print(f"Payload throughput: {payload_bytes / wall_s / 1e6:.2f} MB/s over "
-          f"{wall_s:.3f} s of the loop; {payload_bytes / exchange_s / 1e6:.2f} "
-          "MB/s over exchange calls")
+          f"{wall_s:.3f} s of the loop")
+    if not any(row.get("pipeline_depth", 1) > 1 for row in rows):
+        print(f"Throughput over exchange calls: {payload_bytes / exchange_s / 1e6:.2f} MB/s")
+    else:
+        print("Pipelined block latencies overlap; do not sum them to calculate throughput.")
     print("* Overlapping diagnostics: do not add these rows. DMA syscall time "
           "includes driver/hardware waits, scheduling and Python resumption; "
           "it is not pure PCIe or optical transfer time.")
@@ -167,12 +219,46 @@ def _profile_report(rows, wall_s, open_s, csv_path):
 class OpticalDataMismatch(ValueError):
     """A completed transaction with corrupt returned bytes, safe to continue."""
 
-    def __init__(self, details, returned):
+    def __init__(self, details, returned, *, bit_errors=None, compared_bits=None,
+                 header_intact=None):
         super().__init__(details)
         self.returned = returned
+        self.bit_errors = bit_errors
+        self.compared_bits = compared_bits
+        self.header_intact = header_intact
 
 
-class OpticalLink:
+class _BERStats:
+    """Count bit differences in completed host-to-host packets, not lane idles."""
+
+    def __init__(self):
+        self.completed = self.mismatched = self.bits = self.errors = 0
+        self.header_mismatches = self.transport_failures = 0
+
+    def record(self, mismatch=None):
+        self.completed += 1
+        self.bits += mismatch.compared_bits if mismatch is not None else BLOCK_SIZE * 8
+        if mismatch is not None:
+            self.mismatched += 1
+            self.errors += mismatch.bit_errors
+            self.header_mismatches += int(not mismatch.header_intact)
+
+    def report(self, requested):
+        rate = f"{self.errors / self.bits:.6e}" if self.bits else "unavailable (no completed blocks)"
+        return (
+            f"BER summary: {self.completed}/{requested} blocks completed; "
+            f"{self.completed - self.mismatched} intact; {self.mismatched} mismatched\n"
+            f"Compared packet bits: {self.bits}; differing bits: {self.errors}\n"
+            f"Observed BER on completed packets: {rate}\n"
+            f"Header-mismatched blocks: {self.header_mismatches}; "
+            f"transport failures: {self.transport_failures}; "
+            f"requested blocks not compared: {requested - self.completed}\n"
+            "Counts include HHQ1 headers and padding; exclude Aurora/PCIe encoding and idles.\n"
+            "Incomplete transfers are excluded. Header/stream misalignment can inflate this ratio."
+        )
+
+
+class _LegacyOpticalLink:
     """One 64 KiB transaction at a time, with C2H posted before H2C."""
 
     def __init__(self, h2c: Path, c2h: Path, timeout: float, *, profile=False):
@@ -311,10 +397,13 @@ class OpticalLink:
                 if sent != returned
             ]
             first_bad = bad_offsets[0]
+            bit_errors = sum((expected[i] ^ received[i]).bit_count() for i in bad_offsets)
+            header_intact = received[:HEADER.size] == expected[:HEADER.size]
             details = (
                 f"Optical data mismatch on block {self.sequence}: "
                 f"{len(bad_offsets)} different bytes, first at {first_bad}, "
                 f"last at {bad_offsets[-1]}; "
+                f"{bit_errors} different bits; "
                 f"first sent=0x{expected[first_bad]:02x}, "
                 f"returned=0x{received[first_bad]:02x}, "
                 f"XOR=0x{expected[first_bad] ^ received[first_bad]:02x}; "
@@ -327,10 +416,543 @@ class OpticalLink:
                 actual_payload = received[HEADER.size : HEADER.size + length]
                 details += f"; returned payload CRC=0x{zlib.crc32(actual_payload):08x}"
             self.sequence += 1
-            raise OpticalDataMismatch(details, received[HEADER.size : HEADER.size + len(payload)])
+            raise OpticalDataMismatch(
+                details, received[HEADER.size : HEADER.size + len(payload)],
+                bit_errors=bit_errors, compared_bits=BLOCK_SIZE * 8,
+                header_intact=header_intact,
+            )
         actual_payload = received[HEADER.size : HEADER.size + length]
         self.sequence += 1
         return actual_payload
+
+
+class _DMABuffer:
+    """Page-aligned memory kept alive for an entire link session."""
+
+    def __init__(self, size):
+        self.size = size
+        self.memory = mmap.mmap(-1, size)
+        # Touch pages once, outside the measured exchange loop.
+        self.memory[:] = b"\0" * size
+        self.anchor = ctypes.c_char.from_buffer(self.memory)
+        self.address = ctypes.addressof(self.anchor)
+
+    def transfer(self, fd, data=None, timing=None):
+        started = time.perf_counter() if timing is not None else 0
+        calls = []
+        try:
+            if data is not None:
+                if len(data) != self.size:
+                    raise ValueError("DMA buffer size does not match packet size")
+                self.memory[:] = data
+            if timing is not None:
+                timing["buffer_prepare_s"] = time.perf_counter() - started
+            function = _libc.read if data is None else _libc.write
+            done = 0
+            while done < self.size:
+                if timing is not None:
+                    before = time.perf_counter()
+                count = function(fd, self.address + done, self.size - done)
+                if timing is not None:
+                    calls.append((before, time.perf_counter()))
+                if count < 0:
+                    error = ctypes.get_errno()
+                    if error == errno.EINTR:
+                        continue
+                    raise OSError(error, os.strerror(error))
+                if count == 0:
+                    raise EOFError(f"XDMA made no progress with {self.size - done} bytes missing")
+                done += count
+            if timing is not None:
+                before = time.perf_counter()
+            # Return an owned copy before this slot can be reused.
+            returned = self.memory[:] if data is None else None
+            if timing is not None:
+                timing["result_copy_s"] = time.perf_counter() - before
+            return returned
+        finally:
+            if timing is not None:
+                timing["total_s"] = time.perf_counter() - started
+                timing["syscall_s"] = sum(end - begin for begin, end in calls)
+                timing["calls"] = calls
+
+    def close(self):
+        self.anchor = None
+        self.memory.close()
+
+
+class _TransferJob:
+    def __init__(self, payload, expected, slot, deadline, timing, started):
+        self.payload = payload
+        self.expected = expected
+        self.slot = slot
+        self.deadline = deadline
+        self.timing = timing
+        self.started = started
+        self.workers_started = time.perf_counter() if timing is not None else 0
+        self.read_timing = {} if timing is not None else None
+        self.write_timing = {} if timing is not None else None
+        self.ready = threading.Event()
+        self.read_done = threading.Event()
+        self.write_done = threading.Event()
+        self.result = {}
+
+
+class _MemoryRoundtripBenchmark(_LegacyOpticalLink):
+    """DMA directly between two complete, preallocated RAM datasets.
+
+    Credits are returned only after C2H completes a block. Thus at most
+    pipeline_depth blocks can be on the FPGA/optical path even if the reader
+    is descheduled. No copying, packet generation or verification is done
+    in the timed loop. Each syscall still transfers one framed block.
+    """
+
+    def __init__(self, h2c, c2h, timeout, *, blocks, pipeline_depth):
+        super().__init__(h2c, c2h, timeout)
+        if blocks <= 0 or blocks > 0x100000000:
+            raise ValueError("benchmark block count must fit the 32-bit sequence field")
+        if pipeline_depth not in (1, 2) or BLOCK_SIZE * pipeline_depth > RX_FIFO_BYTES:
+            raise ValueError("benchmark outstanding bytes must not exceed 128 KiB")
+        if BLOCK_SIZE % mmap.PAGESIZE:
+            raise ValueError("memory benchmark block size must be a multiple of the page size")
+        self.blocks = blocks
+        self.pipeline_depth = pipeline_depth
+        self.total_bytes = blocks * BLOCK_SIZE
+        self.send = self.receive = None
+        self._workers = []
+        self._start = threading.Event()
+        self._reader_ready = threading.Event()
+        self._stop = threading.Event()
+        self._credits = threading.Semaphore(pipeline_depth)
+        self._done = [threading.Event(), threading.Event()]
+        self._errors = []
+        self._finished = [None, None]
+        self._completed = [0, 0]
+        self._progress = 0.0
+
+    def __enter__(self):
+        try:
+            self.send = _DMABuffer(self.total_bytes)
+            self.receive = _DMABuffer(self.total_bytes)
+            # Different data in every block exposes duplicates/reordering as
+            # well as corruption. All pages and packets exist before timing.
+            for sequence in range(self.blocks):
+                offset = sequence * BLOCK_SIZE
+                self.send.memory[offset:offset + BLOCK_SIZE] = _packet(
+                    sequence, os.urandom(PAYLOAD_SIZE),
+                )
+            super().__enter__()
+            for index, fd in enumerate((self.c2h_fd, self.h2c_fd)):
+                owned_fd = os.dup(fd)
+                worker = threading.Thread(
+                    target=self._transfer, args=(index, owned_fd),
+                    name="ram-benchmark-c2h" if index == 0 else "ram-benchmark-h2c",
+                    daemon=True,
+                )
+                try:
+                    worker.start()
+                except BaseException:
+                    os.close(owned_fd)
+                    raise
+                self._workers.append(worker)
+            return self
+        except BaseException:
+            self.__exit__()
+            raise
+
+    def __exit__(self, exc_type=None, exc=None, tb=None):
+        self._stop.set()
+        self._start.set()
+        self._reader_ready.set()
+        self._credits.release()
+        deadline = time.monotonic() + self.timeout
+        for worker in self._workers:
+            worker.join(max(0, deadline - time.monotonic()))
+        super().__exit__()
+        self.h2c_fd = self.c2h_fd = None
+        # A blocked daemon retains self, buffers and its duplicated fd. Do
+        # not unmap any memory while the kernel may still be writing to it.
+        if not any(worker.is_alive() for worker in self._workers):
+            for buffer in (self.send, self.receive):
+                if buffer is not None:
+                    buffer.close()
+            self.send = self.receive = None
+        elif exc_type is None:
+            raise TimeoutError("Benchmark DMA is still blocked; buffers remain allocated")
+
+    def _transfer(self, index, fd):
+        receiving = index == 0
+        buffer = self.receive if receiving else self.send
+        function = _libc.read if receiving else _libc.write
+        try:
+            self._start.wait()
+            if receiving:
+                self._reader_ready.set()
+            elif not self._reader_ready.wait(self.timeout):
+                raise TimeoutError("Benchmark receiver did not become ready")
+            for block in range(self.blocks):
+                if not receiving:
+                    while not self._stop.is_set():
+                        if self._credits.acquire(timeout=min(0.1, self.timeout)):
+                            break
+                if self._stop.is_set():
+                    return
+                done = 0
+                while done < BLOCK_SIZE:
+                    count = function(fd, buffer.address + block * BLOCK_SIZE + done,
+                                     BLOCK_SIZE - done)
+                    if count < 0:
+                        error = ctypes.get_errno()
+                        if error == errno.EINTR:
+                            continue
+                        raise OSError(error, os.strerror(error))
+                    if count == 0:
+                        raise EOFError("Benchmark DMA made no progress")
+                    done += count
+                # Timestamp native transfer completion, before notification.
+                finished = time.perf_counter()
+                self._completed[index] = block + 1
+                self._progress = time.monotonic()
+                if block + 1 == self.blocks:
+                    self._finished[index] = finished
+                if receiving:
+                    self._credits.release()
+        except BaseException as exc:
+            self._errors.append(exc)
+            self._stop.set()
+            self._reader_ready.set()
+            self._credits.release()
+        finally:
+            os.close(fd)
+            self._done[index].set()
+
+    def run(self):
+        if self._start.is_set():
+            raise RuntimeError("Use a new benchmark for each run")
+        self._progress = time.monotonic()
+        started = time.perf_counter()
+        self._start.set()
+        while not all(event.is_set() for event in self._done):
+            if self._errors:
+                raise RuntimeError("RAM benchmark DMA failed") from self._errors[0]
+            if time.monotonic() - self._progress > self.timeout:
+                self._stop.set()
+                raise TimeoutError(
+                    f"RAM benchmark stalled: H2C={self._completed[1]}, "
+                    f"C2H={self._completed[0]} completed blocks",
+                )
+            self._done[0 if not self._done[0].is_set() else 1].wait(min(0.05, self.timeout))
+        if self._errors:
+            raise RuntimeError("RAM benchmark DMA failed") from self._errors[0]
+        if any(finish is None for finish in self._finished):
+            raise RuntimeError("RAM benchmark ended before both transfers completed")
+        # Excludes main-thread wakeup/join and all subsequent verification.
+        elapsed = max(self._finished) - started
+        verify_started = time.perf_counter()
+        mismatched_blocks = mismatched_bytes = 0
+        examples = []
+        for block in range(self.blocks):
+            offset = block * BLOCK_SIZE
+            expected = self.send.memory[offset:offset + BLOCK_SIZE]
+            returned = self.receive.memory[offset:offset + BLOCK_SIZE]
+            if expected == returned:
+                continue
+            mismatched_blocks += 1
+            different = [i for i, (sent, got) in enumerate(zip(expected, returned)) if sent != got]
+            mismatched_bytes += len(different)
+            if len(examples) < 10:
+                first = different[0]
+                examples.append({
+                    "block": block, "different_bytes": len(different),
+                    "first_packet_offset": first, "last_packet_offset": different[-1],
+                    "first_sent": expected[first], "first_returned": returned[first],
+                    "header_matches": expected[:HEADER.size] == returned[:HEADER.size],
+                    "expected_payload_crc32": zlib.crc32(expected[HEADER.size:]),
+                    "returned_payload_crc32": zlib.crc32(returned[HEADER.size:]),
+                })
+        payload_bytes = self.blocks * PAYLOAD_SIZE
+        return {
+            "status": "mismatch" if mismatched_blocks else "ok",
+            "blocks": self.blocks, "block_size": BLOCK_SIZE,
+            "pipeline_depth": self.pipeline_depth,
+            "maximum_unreceived_bytes": BLOCK_SIZE * self.pipeline_depth,
+            "packet_bytes": self.total_bytes, "payload_bytes": payload_bytes,
+            "elapsed_s": elapsed, "packet_MB_s": self.total_bytes / elapsed / 1e6,
+            "payload_MB_s": payload_bytes / elapsed / 1e6,
+            "h2c_complete_s": self._finished[1] - started,
+            "c2h_complete_s": self._finished[0] - started,
+            "verification_s": time.perf_counter() - verify_started,
+            "verified_blocks": self.blocks - mismatched_blocks,
+            "mismatched_blocks": mismatched_blocks, "mismatched_bytes": mismatched_bytes,
+            "first_mismatches": examples,
+        }
+
+
+def _memory_benchmark(args):
+    setup_started = time.perf_counter()
+    print(f"Preparing {args.pattern_blocks * BLOCK_SIZE / 2**20:.2f} MiB in each RAM buffer; "
+          f"at most {args.pipeline_depth} blocks unreceived", flush=True)
+    with _MemoryRoundtripBenchmark(
+        args.h2c, args.c2h, args.timeout, blocks=args.pattern_blocks,
+        pipeline_depth=args.pipeline_depth,
+    ) as benchmark:
+        setup_s = time.perf_counter() - setup_started
+        with CpuIdleLatency(args.low_latency):
+            print("Transferring RAM -> FPGA -> QSFP -> FPGA -> RAM; "
+                  "verification follows outside the timer", flush=True)
+            result = benchmark.run()
+    result.update({"setup_s": setup_s, "low_latency_us": args.low_latency,
+                   "h2c": str(args.h2c), "c2h": str(args.c2h)})
+    print(f"RAM roundtrip: {result['packet_bytes']:,} packet bytes in "
+          f"{result['elapsed_s']:.6f} s; {result['packet_MB_s']:.2f} MB/s")
+    print(f"Payload throughput: {result['payload_MB_s']:.2f} MB/s (dataset counted once)")
+    print(f"Post-transfer verification: {result['verified_blocks']}/{result['blocks']} blocks intact; "
+          f"{result['mismatched_blocks']} mismatched blocks, "
+          f"{result['mismatched_bytes']} different bytes; "
+          f"verification={result['verification_s']:.3f} s excluded")
+    for example in result["first_mismatches"]:
+        print(f"  Block {example['block']}: {example['different_bytes']} different bytes; "
+              f"first packet offset={example['first_packet_offset']}")
+    if args.benchmark_json is not None:
+        with args.benchmark_json.open("x") as output:
+            json.dump(result, output, indent=2)
+            output.write("\n")
+        print(f"Results saved to: {args.benchmark_json}")
+    if result["mismatched_blocks"]:
+        raise SystemExit(1)
+
+
+class OpticalLink(_LegacyOpticalLink):
+    """Reuse aligned buffers and two workers; default to one block in flight.
+
+    Only one caller may submit/complete jobs. A two-slot pipeline is available
+    through exchange_blocks(). Its total outstanding bytes cannot exceed the
+    hardware RX FIFO, which cannot apply backpressure to Aurora.
+    """
+
+    def __init__(self, h2c, c2h, timeout, *, profile=False, pipeline_depth=1):
+        super().__init__(h2c, c2h, timeout, profile=profile)
+        if pipeline_depth not in (1, 2) or BLOCK_SIZE * pipeline_depth > RX_FIFO_BYTES:
+            raise ValueError("Use 1 or 2 slots with total outstanding bytes <= 128 KiB")
+        self.pipeline_depth = pipeline_depth
+        self._slots = []
+        self._free = deque()
+        self._jobs = []
+        self._workers = []
+        self._read_queue = queue.Queue()
+        self._write_queue = queue.Queue()
+        self._stopping = threading.Event()
+        self._submitted = 0
+        self._broken = False
+
+    def __enter__(self):
+        if self._workers or self._stopping.is_set():
+            raise RuntimeError("Create a new OpticalLink for each session")
+        super().__enter__()
+        try:
+            for _ in range(self.pipeline_depth):
+                send = _DMABuffer(BLOCK_SIZE)
+                try:
+                    receive = _DMABuffer(BLOCK_SIZE)
+                except BaseException:
+                    send.close()
+                    raise
+                slot = (send, receive)
+                self._slots.append(slot)
+                self._free.append(slot)
+            for receiving, fd in ((True, self.c2h_fd), (False, self.h2c_fd)):
+                # A blocked worker owns its fd and buffer until its syscall
+                # returns, even if the main thread times out and closes.
+                owned_fd = os.dup(fd)
+                worker = threading.Thread(
+                    target=self._worker, args=(receiving, owned_fd),
+                    name="qsfp-c2h" if receiving else "qsfp-h2c", daemon=True,
+                )
+                try:
+                    worker.start()
+                except BaseException:
+                    os.close(owned_fd)
+                    raise
+                self._workers.append(worker)
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, exc_type=None, exc=None, tb=None):
+        deadline = time.monotonic() + self.timeout
+        if not self._broken and not self._stopping.is_set():
+            # On early generator exit or a mismatch, finish already submitted
+            # blocks before stopping either worker. Otherwise a posted read
+            # could be left waiting for a write that shutdown cancelled.
+            for job in list(self._jobs):
+                for event in (job.write_done, job.read_done):
+                    event.wait(max(0, deadline - time.monotonic()))
+        self._stopping.set()
+        for job in self._jobs:
+            job.ready.set()
+        self._read_queue.put(None)
+        self._write_queue.put(None)
+        for worker in self._workers:
+            worker.join(max(0, deadline - time.monotonic()))
+        super().__exit__()
+        self.h2c_fd = self.c2h_fd = None
+        # Never unmap memory still accessible to an in-progress kernel DMA.
+        # A blocked daemon retains this object (and its mappings) until return.
+        if not any(worker.is_alive() for worker in self._workers):
+            for send, receive in self._slots:
+                send.close()
+                receive.close()
+            self._slots.clear()
+            self._free.clear()
+        elif exc_type is None:
+            raise TimeoutError("DMA workers are still blocked; their buffers remain allocated")
+
+    def _worker(self, receiving, fd):
+        jobs = self._read_queue if receiving else self._write_queue
+        try:
+            while True:
+                job = jobs.get()
+                if job is None:
+                    return
+                try:
+                    if self._stopping.is_set():
+                        raise RuntimeError("Optical link is closing")
+                    if receiving:
+                        job.ready.set()
+                        job.result["data"] = job.slot[1].transfer(
+                            fd, timing=job.read_timing,
+                        )
+                    else:
+                        if not job.ready.wait(max(0, job.deadline - time.monotonic())):
+                            raise TimeoutError("C2H worker did not become ready")
+                        if self._stopping.is_set():
+                            raise RuntimeError("Optical link is closing")
+                        job.slot[0].transfer(fd, job.expected, job.write_timing)
+                except BaseException as exc:
+                    job.result["error" if receiving else "write_error"] = exc
+                    self._stopping.set()
+                    for pending in self._jobs:
+                        pending.ready.set()
+                finally:
+                    (job.read_done if receiving else job.write_done).set()
+        finally:
+            os.close(fd)
+
+    def _submit(self, payload):
+        if self.h2c_fd is None or self._stopping.is_set() or self._broken:
+            raise RuntimeError("XDMA link is closed or failed; open a new session")
+        if not self._free:
+            raise RuntimeError("All DMA slots are still in flight")
+        started = time.perf_counter() if self.profile else 0
+        expected = _packet(self._submitted, payload)
+        timing = None
+        if self.profile:
+            timing = {"block": self._submitted, "payload_bytes": len(payload),
+                      "pipeline_depth": self.pipeline_depth,
+                      "packet_prepare_s": time.perf_counter() - started}
+        job = _TransferJob(payload, expected, self._free.popleft(),
+                           time.monotonic() + self.timeout, timing, started)
+        self._submitted += 1
+        self._jobs.append(job)
+        self._read_queue.put(job)
+        self._write_queue.put(job)
+        return job
+
+    def _complete(self, job):
+        timing = job.timing
+        try:
+            for event, message in (
+                (job.write_done, "H2C write stalled; check PCIe and both Aurora links"),
+                (job.read_done, "No C2H block returned; check PCIe and both Aurora links"),
+            ):
+                if not event.wait(max(0, job.deadline - time.monotonic())):
+                    self._broken = True
+                    raise TimeoutError(message)
+            for key, message in (("write_error", "XDMA H2C write failed"),
+                                 ("error", "XDMA C2H read failed")):
+                if key in job.result:
+                    self._broken = True
+                    raise RuntimeError(message) from job.result[key]
+            if timing is not None:
+                timing["workers_s"] = time.perf_counter() - job.workers_started
+                union = end = 0.0
+                for begin, finish in sorted(job.read_timing["calls"] + job.write_timing["calls"]):
+                    union += max(0.0, finish - max(begin, end))
+                    end = max(end, finish)
+                timing["syscall_union_s"] = union
+                timing["outside_syscalls_s"] = max(0.0, timing["workers_s"] - union)
+                for prefix, values in (("h2c", job.write_timing), ("c2h", job.read_timing)):
+                    for name in ("buffer_prepare_s", "syscall_s", "result_copy_s", "total_s"):
+                        timing[f"{prefix}_{name}"] = values[name]
+                    timing[f"{prefix}_syscall_count"] = len(values["calls"])
+                    timing[f"{prefix}_syscall_start_s"] = values["calls"][0][0] - job.workers_started
+                    timing[f"{prefix}_syscall_end_s"] = values["calls"][-1][1] - job.workers_started
+                timing["syscall_overlap_s"] = (
+                    job.read_timing["syscall_s"] + job.write_timing["syscall_s"] - union
+                )
+                verification_started = time.perf_counter()
+            try:
+                returned = self._verify(job.payload, job.expected, job.result["data"])
+            finally:
+                if timing is not None:
+                    timing["verify_s"] = time.perf_counter() - verification_started
+            if timing is not None:
+                timing["status"] = "ok"
+            return returned
+        except BaseException as exc:
+            if timing is not None:
+                timing["status"] = type(exc).__name__
+            raise
+        finally:
+            if timing is not None:
+                timing["exchange_s"] = time.perf_counter() - job.started
+                self.last_profile = timing
+            if job.read_done.is_set() and job.write_done.is_set():
+                self._free.append(job.slot)
+            self._jobs.remove(job)
+
+    def exchange(self, payload):
+        """Preserve the controller's one-block-at-a-time API."""
+        if self._jobs:
+            raise RuntimeError("Do not mix exchange() with an active pipeline")
+        return self._complete(self._submit(payload))
+
+    def exchange_blocks(self, payloads, *, on_mismatch=None):
+        """Return (payload, received) in order with bounded outstanding bytes.
+
+        With on_mismatch(payload, exception), report corrupt completed blocks
+        and yield their returned payloads. Without it, propagate the mismatch.
+        Transport errors always propagate.
+        """
+        if self._jobs:
+            raise RuntimeError("An exchange is already active")
+        pending = deque()
+        iterator = iter(payloads)
+        exhausted = False
+        while pending or not exhausted:
+            while len(pending) < self.pipeline_depth and not exhausted:
+                before = time.perf_counter() if self.profile else 0
+                try:
+                    payload = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                source_s = time.perf_counter() - before if self.profile else 0
+                job = self._submit(payload)
+                if job.timing is not None:
+                    job.timing["source_prepare_s"] = source_s
+                pending.append(job)
+            if pending:
+                job = pending.popleft()
+                try:
+                    returned = self._complete(job)
+                except OpticalDataMismatch as exc:
+                    if on_mismatch is None:
+                        raise
+                    on_mismatch(job.payload, exc)
+                    returned = exc.returned
+                yield job.payload, returned
 
 
 def hydraharp_blocks(
@@ -507,6 +1129,36 @@ def main() -> None:
         help="save per-block timings to a new CSV file (requires --profile)",
     )
     parser.add_argument("--quiet", action="store_true", help="omit per-block success lines")
+    parser.add_argument(
+        "--ber", action="store_true",
+        help="pattern-only bit-error measurement using independent random payloads; "
+             "continue on mismatches and report completed-packet BER even on transport failure",
+    )
+    parser.add_argument(
+        "--error-log", type=Path,
+        help="new file for streaming mismatches/transport errors; default: a timestamped "
+             "qsfp_errors_*.log in the current directory (created only on error)",
+    )
+    parser.add_argument(
+        "--memory-benchmark", action="store_true",
+        help="prebuild pattern data in aligned RAM, transfer concurrently, then verify outside "
+             "the timer; use --pattern-blocks for dataset size and --pipeline-depth for credits",
+    )
+    parser.add_argument("--benchmark-json", type=Path,
+                        help="save RAM benchmark results to a new JSON file")
+    parser.add_argument(
+        "--low-latency", nargs="?", const=2, default=None, type=int, metavar="US",
+        help="temporarily limit CPU idle exit latency while streaming (default when enabled: "
+             "2 us); requires access to /dev/cpu_dma_latency",
+    )
+    parser.add_argument(
+        "--engine", choices=("reused", "legacy"), default="reused",
+        help="reuse workers/buffers (default), or use the original per-block method",
+    )
+    parser.add_argument(
+        "--pipeline-depth", type=int, choices=(1, 2), default=1,
+        help="pattern blocks in flight (default: 1); experimental depth 2 requires the reused engine",
+    )
     parser.add_argument("--h2c", type=Path, default=Path("/dev/xdma0_h2c_0"))
     parser.add_argument("--c2h", type=Path, default=Path("/dev/xdma0_c2h_0"))
     parser.add_argument("--timeout", type=float, default=10)
@@ -514,7 +1166,9 @@ def main() -> None:
         "--block-size", type=int, default=BLOCK_SIZE, metavar="BYTES",
         help=f"full XDMA/Aurora block size in bytes (default: {BLOCK_SIZE})",
     )
-    parser.add_argument("--output", type=Path, help="write returned HH T2 records here")
+    parser.add_argument("--output", type=Path,
+                        help="write returned HH T2 records here, including corrupt returns "
+                             "identified in the error log")
     parser.add_argument("--duration-ms", type=int, default=10000)
     parser.add_argument("--poll-ms", type=int, default=10)
     parser.add_argument("--buffer-records", type=int, default=1048576)
@@ -524,6 +1178,33 @@ def main() -> None:
         default=Path(__file__).with_name("HH.ini"),
     )
     args = parser.parse_args()
+    if args.ber and (args.source != "pattern" or args.memory_benchmark
+                     or args.thread_overhead_benchmark is not None):
+        parser.error("--ber requires --source pattern and cannot be combined with other benchmarks")
+    if args.ber and args.pattern_blocks > 0x100000000:
+        parser.error("--ber block count must fit the 32-bit sequence field")
+    if args.error_log is not None and args.error_log.exists():
+        parser.error("--error-log must name a new file")
+    if args.error_log is not None and not args.error_log.parent.is_dir():
+        parser.error("--error-log parent directory must exist")
+    if args.error_log is not None and (args.memory_benchmark or args.thread_overhead_benchmark is not None):
+        parser.error("--error-log is for streaming; use --benchmark-json for the RAM benchmark")
+    if args.low_latency is not None and not 0 <= args.low_latency <= 2147483647:
+        parser.error("--low-latency must be between 0 and 2147483647 us")
+    if args.benchmark_json is not None and not args.memory_benchmark:
+        parser.error("--benchmark-json requires --memory-benchmark")
+    if args.benchmark_json is not None and args.benchmark_json.exists():
+        parser.error("--benchmark-json must name a new file")
+    if args.memory_benchmark:
+        if args.source != "pattern" or args.engine != "reused":
+            parser.error("--memory-benchmark requires --source pattern --engine reused")
+        if args.profile or args.profile_csv or args.output or args.thread_overhead_benchmark is not None:
+            parser.error("--memory-benchmark cannot be combined with --profile, --profile-csv, "
+                         "--output or --thread-overhead-benchmark")
+        if args.block_size % mmap.PAGESIZE:
+            parser.error("--memory-benchmark requires --block-size to be a multiple of the page size")
+        if args.pattern_blocks > 0x100000000:
+            parser.error("--memory-benchmark block count must fit the 32-bit sequence field")
     if args.profile_csv is not None and not args.profile:
         parser.error("--profile-csv requires --profile")
     if args.profile and (args.source != "pattern" or args.thread_overhead_benchmark is not None):
@@ -531,6 +1212,8 @@ def main() -> None:
     if args.profile_csv is not None and args.profile_csv.exists():
         parser.error("--profile-csv must name a new file")
     if args.thread_overhead_benchmark is not None:
+        if args.low_latency is not None:
+            parser.error("--low-latency is only for streaming, not the thread benchmark")
         if args.thread_overhead_benchmark <= 0:
             parser.error("--thread-overhead-benchmark must be positive")
         if args.source is not None:
@@ -553,16 +1236,24 @@ def main() -> None:
         parser.error("duration, poll interval, buffer size, timeout, and pattern blocks must be positive")
     if args.source == "hydraharp" and args.pattern_blocks != 1:
         parser.error("--pattern-blocks is only for --source pattern")
+    if args.pipeline_depth > 1 and (args.engine != "reused" or args.source != "pattern"):
+        parser.error("--pipeline-depth 2 requires --engine reused --source pattern")
+    if args.engine == "reused" and args.block_size * args.pipeline_depth > RX_FIFO_BYTES:
+        parser.error("total outstanding bytes must not exceed the 128 KiB FPGA RX FIFO")
 
     # Keep the existing 64 KiB default, but allow smaller aligned packets to
     # distinguish per-transfer failures from failures after a cumulative byte
     # count. All stream helpers use these module-level sizes at runtime.
     BLOCK_SIZE = args.block_size
     PAYLOAD_SIZE = BLOCK_SIZE - HEADER.size
+    if args.memory_benchmark:
+        _memory_benchmark(args)
+        return
 
     blocks = (
         (
-            (bytes(range(256)) * ((PAYLOAD_SIZE + 255) // 256))[:PAYLOAD_SIZE]
+            (os.urandom(PAYLOAD_SIZE) if args.ber else
+             (bytes(range(256)) * ((PAYLOAD_SIZE + 255) // 256))[:PAYLOAD_SIZE])
             for _ in range(args.pattern_blocks)
         )
         if args.source == "pattern"
@@ -570,12 +1261,66 @@ def main() -> None:
     )
     rows = []
     open_started = time.perf_counter()
-    with OpticalLink(args.h2c, args.c2h, args.timeout, profile=args.profile) as link:
+    link_class = OpticalLink if args.engine == "reused" else _LegacyOpticalLink
+    options = {"profile": args.profile}
+    if args.engine == "reused":
+        options["pipeline_depth"] = args.pipeline_depth
+    mismatch_count = 0
+    ber = _BERStats() if args.ber else None
+    error_log = None
+    error_path = args.error_log or Path(
+        f"qsfp_errors_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+    )
+
+    def record_error(message):
+        nonlocal error_log
+        if error_log is None:
+            error_log = error_path.open("x", encoding="utf-8")
+            print(f"QSFP error log: {error_path.resolve()}", flush=True)
+            error_log.write(f"Source: {args.source}; block size: {BLOCK_SIZE}; "
+                            f"requested pattern blocks: {args.pattern_blocks}; BER mode: {args.ber}\n")
+        error_log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+        error_log.flush()
+
+    def record_mismatch(payload, exc):
+        nonlocal mismatch_count
+        mismatch_count += 1
+        if ber is not None:
+            ber.record(exc)
+        record_error(str(exc))
+
+    with CpuIdleLatency(args.low_latency), link_class(args.h2c, args.c2h, args.timeout, **options) as link:
+        if args.low_latency is not None:
+            print(f"Low latency enabled: CPU idle exit limit {args.low_latency} us "
+                  "for this streaming session")
         open_s = time.perf_counter() - open_started
         output = args.output.open("wb") if args.output is not None else None
         loop_started = time.perf_counter()
+        pipeline = (
+            link.exchange_blocks(blocks, on_mismatch=record_mismatch)
+            if args.pipeline_depth > 1 else None
+        )
         try:
             while True:
+                if pipeline is not None:
+                    previous_profile = link.last_profile
+                    previous_mismatches = mismatch_count
+                    started = time.perf_counter()
+                    try:
+                        block, returned = next(pipeline)
+                    except StopIteration:
+                        break
+                    finally:
+                        if args.profile and link.last_profile is not previous_profile:
+                            rows.append(dict(link.last_profile))
+                    if output is not None:
+                        output.write(returned)
+                    if ber is not None and mismatch_count == previous_mismatches:
+                        ber.record()
+                    if mismatch_count == previous_mismatches and not (args.quiet or args.profile):
+                        print(f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
+                              f"completion_wait={(time.perf_counter() - started) * 1000:.3f} ms")
+                    continue
                 source_started = time.perf_counter() if args.profile else 0
                 try:
                     block = next(blocks)
@@ -584,29 +1329,59 @@ def main() -> None:
                 if args.profile:
                     source_s = time.perf_counter() - source_started
                 started = time.perf_counter()
+                matched = True
                 try:
                     returned = link.exchange(block)
+                except OpticalDataMismatch as exc:
+                    matched = False
+                    record_mismatch(block, exc)
+                    returned = exc.returned
                 finally:
                     if args.profile and link.last_profile is not None:
                         row = dict(link.last_profile)
                         row["source_prepare_s"] = source_s
                         rows.append(row)
                 elapsed = time.perf_counter() - started
+                if ber is not None and matched:
+                    ber.record()
                 if output is not None:
                     output.write(returned)
-                if not (args.quiet or args.profile):
+                if matched and not (args.quiet or args.profile):
                     rate = len(block) / elapsed / 1_000_000
                     print(
                         f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
                         f"exchange={elapsed * 1000:.3f} ms, payload_rate={rate:.2f} MB/s"
                     )
+        except Exception as exc:
+            record_error(f"Stream stopped after {link.sequence} completed blocks: "
+                         f"{type(exc).__name__}: {exc}")
+            if ber is not None:
+                ber.transport_failures += 1
+                print(f"BER run stopped: {type(exc).__name__}: {exc}", flush=True)
+                raise SystemExit(1) from None
+            raise
         finally:
             wall_s = time.perf_counter() - loop_started
+            if ber is not None:
+                summary = ber.report(args.pattern_blocks)
+                print(summary, flush=True)
+                if error_log is not None:
+                    error_log.write(summary + "\n")
             if output is not None:
                 output.close()
+            if error_log is not None:
+                try:
+                    error_log.write(f"Completed blocks: {link.sequence}; verified: "
+                                    f"{link.sequence - mismatch_count}; mismatched: {mismatch_count}\n")
+                finally:
+                    error_log.close()
             if args.profile:
                 _profile_report(rows, wall_s, open_s, args.profile_csv)
-    print(f"Finished: {link.sequence} blocks")
+    print(f"Finished: {link.sequence} blocks; verified: {link.sequence - mismatch_count}; "
+          f"mismatched: {mismatch_count}")
+    if mismatch_count:
+        print(f"Error log: {error_path.resolve()}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
