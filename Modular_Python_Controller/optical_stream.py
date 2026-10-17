@@ -1129,6 +1129,32 @@ def main() -> None:
         help="save per-block timings to a new CSV file (requires --profile)",
     )
     parser.add_argument("--quiet", action="store_true", help="omit per-block success lines")
+    parser.add_argument("--guard-sweep", action="store_true",
+                        help="run the separate FPGA optical-burst diagnostic, then restore streaming")
+    parser.add_argument("--guard-us", default="1000000,100000,10000,1000,100,50,20,10,8,6,4,2",
+                        help="comma-separated command-to-payload guard times in us")
+    parser.add_argument("--guard-trials", type=int, default=10)
+    parser.add_argument("--guard-header-trace", action="store_true",
+                        help="Read native receiver header/alignment counters in 100 us windows via JTAG")
+    parser.add_argument("--guard-baseline-us", type=float, default=0,
+                        help="Continuously illuminated baseline observation time in microseconds")
+    parser.add_argument("--guard-baseline-trials", type=int, default=20)
+    parser.add_argument("--guard-dark-ms", type=float, default=100)
+    parser.add_argument("--guard-timeout-ms", type=float, default=100)
+    parser.add_argument("--guard-reset-mode", choices=("reset", "keep", "compare"), default="reset",
+                        help="reset Aurora between bursts, keep it running, or compare both")
+    parser.add_argument("--guard-test", choices=("burst", "illuminated-reset", "illuminated-rx-reset", "compare", "compare-all", "burst-restart", "compare-restart", "prbs-compare", "prbs-restart", "prbs-hold"), default="burst",
+                        help="toggle lasers, reset Aurora/GTs with steady light, or compare conditions")
+    parser.add_argument("--guard-prbs-quiet-us", type=float, default=100,
+                        help="Native PRBS error-free qualification interval (default 100 us)")
+    parser.add_argument("--guard-hold-modes", default="none,equalizer,cdr,both",
+                        help="comma-separated native GTY hold modes, applied to QSFP4 RX only")
+    parser.add_argument("--guard-hold-release-us", default="0,10,100,500,1000,2000,5000,10000",
+                        help="hardware-timed GTY hold release delays after TX-enable STOP")
+    parser.add_argument("--guard-rx-release-us", default="0,100,500,1000",
+                        help="comma-separated RX restart release delays after TX-enable STOP")
+    parser.add_argument("--guard-output", type=Path,
+                        help="new directory for sweep plan, trial CSV, summary and Vivado log")
     parser.add_argument(
         "--ber", action="store_true",
         help="pattern-only bit-error measurement using independent random payloads; "
@@ -1178,6 +1204,24 @@ def main() -> None:
         default=Path(__file__).with_name("HH.ini"),
     )
     args = parser.parse_args()
+    if args.guard_sweep:
+        if (args.source != "pattern" or args.ber or args.memory_benchmark or args.profile
+                or args.profile_csv or args.output or args.error_log
+                or args.thread_overhead_benchmark is not None or args.low_latency is not None
+                or args.engine != "reused" or args.pipeline_depth != 1):
+            parser.error("--guard-sweep requires --source pattern and cannot be combined "
+                         "with DMA/HH/other benchmark modes")
+        from guard_sweep import run_sweep
+        try:
+            run_sweep(guards_us=args.guard_us, repeats=args.guard_trials,
+                      dark_ms=args.guard_dark_ms, baseline_trials=args.guard_baseline_trials,
+                      block_size=args.block_size, timeout_ms=args.guard_timeout_ms,
+                      output_dir=args.guard_output, reset_mode=args.guard_reset_mode, test_mode=args.guard_test, rx_release_us=args.guard_rx_release_us,
+                      header_trace=args.guard_header_trace, baseline_guard_us=args.guard_baseline_us, prbs_quiet_us=args.guard_prbs_quiet_us,
+                      hold_modes=args.guard_hold_modes, hold_release_us=args.guard_hold_release_us)
+        except (ValueError, FileNotFoundError) as exc:
+            parser.error(str(exc))
+        return
     if args.ber and (args.source != "pattern" or args.memory_benchmark
                      or args.thread_overhead_benchmark is not None):
         parser.error("--ber requires --source pattern and cannot be combined with other benchmarks")
