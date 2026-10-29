@@ -1,0 +1,13 @@
+{
+  "test": "Linux TCP loopback CLI file replay; synthetic raw words, no HH device",
+  "payload_bytes": 2097156,
+  "records": 524289,
+  "blocks": 2049,
+  "block_size": 1024,
+  "sha256": "3bda007531cf9cb7c2c4f4b6de0456041148b85530490a75d6dce34cda01b6f8",
+  "receiver_status": "complete",
+  "receiver_seconds_including_CRC_disk_flush": 0.02399285603314638,
+  "sender_stdout": "Ready: session 27236d81c8444c1b9782555028c1f67c\n{\n  \"type\": \"SAVED\",\n  \"session\": \"27236d81c8444c1b9782555028c1f67c\",\n  \"bytes\": 2097156,\n  \"blocks\": 2049,\n  \"records\": 524289,\n  \"sha256\": \"3bda007531cf9cb7c2c4f4b6de0456041148b85530490a75d6dce34cda01b6f8\",\n  \"receiver_seconds\": 0.02399285603314638,\n  \"sender_seconds\": 0.02536890795454383,\n  \"payload_MB_s\": 82.66638846881771\n}\n",
+  "receiver_stdout": "{\n  \"status\": \"complete\",\n  \"version\": 2,\n  \"format\": \"hydraharp400_t2_raw_le_u32\",\n  \"output\": \"/tmp/tmpgh7hhnsu/received.bin\",\n  \"bytes_saved\": 2097156,\n  \"blocks_saved\": 2049,\n  \"records_saved\": 524289,\n  \"started_unix\": 1793308551.1279578,\n  \"session\": \"27236d81c8444c1b9782555028c1f67c\",\n  \"metadata\": {\n    \"source\": \"completed_raw_file_replay\",\n    \"record_format\": \"hydraharp400_t2_raw_le_u32\",\n    \"time_resolution_ps\": null\n  },\n  \"block_size\": 1024,\n  \"peer\": \"('127.0.0.1', 56952)\",\n  \"sha256\": \"3bda007531cf9cb7c2c4f4b6de0456041148b85530490a75d6dce34cda01b6f8\",\n  \"finished_unix\": 1793308551.15481,\n  \"receiver_seconds\": 0.02399285603314638,\n  \"payload_MB_s\": 87.40751818386094\n}\n",
+  "matched_source_exactly": true
+}
