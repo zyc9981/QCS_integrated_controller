@@ -11,6 +11,7 @@ the stream. A run containing mismatches exits with status 1 after completion.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from collections import deque
 import csv
 import ctypes
@@ -955,6 +956,57 @@ class OpticalLink(_LegacyOpticalLink):
                 yield job.payload, returned
 
 
+class ModeOpticalLink(OpticalLink):
+    """Use the existing hardware payload gate for a whole acquisition batch."""
+
+    def __init__(self, h2c, c2h, timeout, *, control, mode="continuous",
+                 guard_ms=15.0, status=None, profile=False, pipeline_depth=1):
+        super().__init__(h2c, c2h, timeout, profile=profile, pipeline_depth=pipeline_depth)
+        self.control, self.mode, self.guard_ms = control, mode, guard_ms
+        self.status = status or (lambda message: None)
+        self._activated = False
+
+    def __enter__(self):
+        self.control.prepare(self.mode, self.guard_ms)
+        try:
+            return super().__enter__()
+        except BaseException:
+            self.control.finish("burst")
+            raise
+
+    def _submit(self, payload):
+        job = super()._submit(payload)
+        if not self._activated:
+            self.status(f"Enabling TX2; waiting {self.guard_ms:g} ms guard" if self.mode == "burst"
+                        else "Starting continuous QSFP transfer")
+            try:
+                # Hardware first confirms a complete packet was preloaded.
+                # The I2C enable STOP then starts the FPGA guard countdown.
+                self.control.start()
+            except BaseException:
+                self._broken = True
+                raise
+            self._activated = True
+            self.status("Transmitting QSFP batch")
+        return job
+
+    def __exit__(self, exc_type=None, exc=None, tb=None):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            # A complete return is already in host RAM before laser shutdown.
+            # On transport failure force darkness even in continuous mode.
+            finish_mode = "burst" if self._broken or exc_type is not None else self.mode
+            try:
+                self.control.finish(finish_mode)
+                self.status("Laser off · Burst ready" if finish_mode == "burst"
+                            else "Laser on · Continuous ready")
+            except Exception as close_error:
+                self.status(f"QSFP shutdown error: {close_error}")
+                if exc_type is None:
+                    raise
+
+
 def hydraharp_blocks(
     hh, duration_ms, buffer_records=1048576, poll_ms=10,
     stop_event=None, *, started=False,
@@ -997,58 +1049,109 @@ def hydraharp_blocks(
             hh.raw.stopMeasure()
 
 
-def capture_hh_qsfp(hh, duration_ms, output, stop_event, *, started=False, progress=None):
-    """Keep HH recording after QSFP failures; preserve original and returned data.
+def capture_hh_qsfp(hh, duration_ms, output, stop_event, *, started=False, progress=None,
+                    mode="continuous", guard_ms=15.0, control=None, status=None):
+    """Preserve all HH data and log mismatches without stopping acquisition.
 
-    .source.bin contains every drained HH payload. The requested output contains
-    completed QSFP returns (including corrupt ones); the log identifies failures.
-    After a transport failure, stop submitting DMA and continue saving HH locally.
+    Continuous mode transmits while recording. Burst mode records the completed
+    acquisition in .source.bin, then sends that file as one optical burst. Disk
+    buffering avoids unbounded RAM use. Guard timing is enforced in FPGA logic.
     """
+    if mode not in ("continuous", "burst"):
+        raise ValueError("QSFP mode must be continuous or burst")
+    if mode == "burst" and control is None:
+        raise ValueError("Burst mode requires the QSFP mode control connection")
+    report = status or (lambda message: None)
     output = Path(output)
     source_path = output.with_name(output.name + ".source.bin")
     log_path = output.with_name(output.name + ".error.txt")
     count = byte_count = captured_bytes = mismatch_count = 0
     error = stop_error = None
-    blocks = None
-    link = OpticalLink(Path("/dev/xdma0_h2c_0"), Path("/dev/xdma0_c2h_0"), 10.0)
-    available = False
-    with output.open("xb") as saved, source_path.open("xb") as source, log_path.open("x", encoding="utf-8") as log:
+    blocks = link = None
+    available = link_entered = False
+    burst_control_ready = True
+    with output.open("xb") as saved, source_path.open("x+b") as source, log_path.open("x", encoding="utf-8") as log:
         def record(message):
             log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
             log.flush()
 
-        record(f"Original HH data: {source_path}; QSFP returned data: {output}")
-        try:
+        def open_link():
+            nonlocal link, available, link_entered, error
             try:
+                args = (Path("/dev/xdma0_h2c_0"), Path("/dev/xdma0_c2h_0"), 10.0)
+                link = (OpticalLink(*args) if control is None else
+                        ModeOpticalLink(*args, control=control, mode=mode,
+                                        guard_ms=guard_ms, status=report))
                 link.__enter__()
-                available = True
+                available = link_entered = True
             except Exception as exc:
                 error = f"QSFP unavailable: {exc}"
-                record(error + "; continuing HH recording locally")
+                record(error + "; HH data remains local")
+                report(error)
+
+        def transmit(index, payload, offset):
+            nonlocal count, byte_count, mismatch_count, available, error
+            try:
+                returned = link.exchange(payload)
+            except OpticalDataMismatch as exc:
+                mismatch_count += 1
+                record(f"Capture block {index}, source offset {offset}: {exc}")
+                saved.write(exc.returned)
+            except Exception as exc:
+                error = f"QSFP transport failure on capture block {index}: {exc}"
+                record(error + "; disabling QSFP transfers and preserving HH locally")
+                report(error)
+                available = False
+            else:
+                saved.write(returned)
+                count += 1
+                byte_count += len(returned)
+            if progress is not None:
+                progress(count, byte_count)
+
+        record(f"Mode: {mode}; effective guard: {guard_ms if mode == 'burst' else 0:g} ms; "
+               "batch: complete HH acquisition")
+        record(f"Original HH data: {source_path}; QSFP returned data: {output}")
+        try:
+            if mode == "continuous":
+                open_link()
+            else:
+                # The link is prepared after capture, before the first DMA.
+                try:
+                    control.idle("burst")
+                except Exception as exc:
+                    burst_control_ready = False
+                    error = f"QSFP unavailable: {exc}"
+                    record(error + "; continuing HH recording locally")
+                    report(error)
+                else:
+                    report("Laser off · Recording HH locally; transmission follows acquisition")
             blocks = hydraharp_blocks(hh, duration_ms, stop_event=stop_event, started=started)
+            last_update = 0.0
             for capture_index, payload in enumerate(blocks):
                 source.write(payload)
                 captured_bytes += len(payload)
-                if available:
-                    try:
-                        returned = link.exchange(payload)
-                    except OpticalDataMismatch as exc:
-                        mismatch_count += 1
-                        record(f"Capture block {capture_index}, source offset {captured_bytes - len(payload)}: {exc}")
-                        saved.write(exc.returned)
-                    except Exception as exc:
-                        error = f"QSFP transport failure on capture block {capture_index}: {exc}"
-                        record(error + "; disabling QSFP transfers and continuing HH locally")
-                        available = False
-                    else:
-                        saved.write(returned)
-                        count += 1
-                        byte_count += len(returned)
-                if progress is not None:
-                    progress(count, byte_count)
+                if mode == "continuous" and available:
+                    transmit(capture_index, payload, captured_bytes - len(payload))
+                if mode == "burst" and burst_control_ready and time.monotonic() - last_update >= 0.25:
+                    report(f"Laser off · Recording HH: {captured_bytes:,} T2 bytes saved locally")
+                    last_update = time.monotonic()
+            if mode == "burst" and captured_bytes and burst_control_ready:
+                source.flush()
+                source.seek(0)
+                open_link()
+                capture_index = 0
+                while available:
+                    offset = source.tell()
+                    payload = source.read(PAYLOAD_SIZE)
+                    if not payload:
+                        break
+                    transmit(capture_index, payload, offset)
+                    capture_index += 1
         except Exception as exc:
             error = f"{error}; capture failure: {exc}" if error else f"Capture failure: {exc}"
             record(error)
+            report(error)
         finally:
             try:
                 if blocks is not None:
@@ -1059,7 +1162,8 @@ def capture_hh_qsfp(hh, duration_ms, output, stop_event, *, started=False, progr
                 stop_error = str(exc)
                 record(f"HydraHarp stop error: {exc}")
             try:
-                link.__exit__()
+                if link_entered:
+                    link.__exit__()
             except Exception as exc:
                 error = f"{error}; QSFP close: {exc}" if error else f"QSFP close: {exc}"
                 record(error)
@@ -1070,10 +1174,11 @@ def capture_hh_qsfp(hh, duration_ms, output, stop_event, *, started=False, progr
         error = f"{summary}; {error}" if error else summary
     if error or stop_error:
         error = f"{error or 'HydraHarp stop failed'}; log: {log_path}"
+        report(f"QSFP error: {error}")
     return {"blocks": count, "bytes": byte_count, "error": error,
             "stop_error": stop_error, "path": output, "source_path": source_path,
             "error_path": log_path, "mismatches": mismatch_count,
-            "captured_bytes": captured_bytes}
+            "captured_bytes": captured_bytes, "mode": mode, "guard_ms": guard_ms}
 
 
 def _hydraharp_blocks(args):
@@ -1110,6 +1215,10 @@ def main() -> None:
     global BLOCK_SIZE, PAYLOAD_SIZE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", choices=("pattern", "hydraharp"))
+    parser.add_argument("--link-mode", choices=("continuous", "burst"),
+                        help="pattern test using the controller mode image and live laser/gate controls")
+    parser.add_argument("--guard-ms", type=float, default=15.0,
+                        help="burst payload guard in ms from TX-enable I2C STOP (default: 15)")
     parser.add_argument(
         "--pattern-blocks", type=int, default=1, metavar="N",
         help="send N numbered pattern blocks (default: 1)",
@@ -1129,6 +1238,32 @@ def main() -> None:
         help="save per-block timings to a new CSV file (requires --profile)",
     )
     parser.add_argument("--quiet", action="store_true", help="omit per-block success lines")
+    parser.add_argument("--guard-sweep", action="store_true",
+                        help="run the separate FPGA optical-burst diagnostic, then restore streaming")
+    parser.add_argument("--guard-us", default="1000000,100000,10000,1000,100,50,20,10,8,6,4,2",
+                        help="comma-separated command-to-payload guard times in us")
+    parser.add_argument("--guard-trials", type=int, default=10)
+    parser.add_argument("--guard-header-trace", action="store_true",
+                        help="Read native receiver header/alignment counters in 100 us windows via JTAG")
+    parser.add_argument("--guard-baseline-us", type=float, default=0,
+                        help="Continuously illuminated baseline observation time in microseconds")
+    parser.add_argument("--guard-baseline-trials", type=int, default=20)
+    parser.add_argument("--guard-dark-ms", type=float, default=100)
+    parser.add_argument("--guard-timeout-ms", type=float, default=100)
+    parser.add_argument("--guard-reset-mode", choices=("reset", "keep", "compare"), default="reset",
+                        help="reset Aurora between bursts, keep it running, or compare both")
+    parser.add_argument("--guard-test", choices=("burst", "illuminated-reset", "illuminated-rx-reset", "compare", "compare-all", "burst-restart", "compare-restart", "prbs-compare", "prbs-restart", "prbs-hold"), default="burst",
+                        help="toggle lasers, reset Aurora/GTs with steady light, or compare conditions")
+    parser.add_argument("--guard-prbs-quiet-us", type=float, default=100,
+                        help="Native PRBS error-free qualification interval (default 100 us)")
+    parser.add_argument("--guard-hold-modes", default="none,equalizer,cdr,both",
+                        help="comma-separated native GTY hold modes, applied to QSFP4 RX only")
+    parser.add_argument("--guard-hold-release-us", default="0,10,100,500,1000,2000,5000,10000",
+                        help="hardware-timed GTY hold release delays after TX-enable STOP")
+    parser.add_argument("--guard-rx-release-us", default="0,100,500,1000",
+                        help="comma-separated RX restart release delays after TX-enable STOP")
+    parser.add_argument("--guard-output", type=Path,
+                        help="new directory for sweep plan, trial CSV, summary and Vivado log")
     parser.add_argument(
         "--ber", action="store_true",
         help="pattern-only bit-error measurement using independent random payloads; "
@@ -1178,6 +1313,34 @@ def main() -> None:
         default=Path(__file__).with_name("HH.ini"),
     )
     args = parser.parse_args()
+    if args.link_mode:
+        from qsfp_mode_control import guard_ticks
+        try:
+            guard_ticks(args.guard_ms)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if (args.source != "pattern" or args.engine != "reused" or args.memory_benchmark
+                or args.guard_sweep or args.thread_overhead_benchmark is not None):
+            parser.error("--link-mode requires --source pattern --engine reused; "
+                         "omit other benchmark/sweep modes")
+    if args.guard_sweep:
+        if (args.source != "pattern" or args.ber or args.memory_benchmark or args.profile
+                or args.profile_csv or args.output or args.error_log
+                or args.thread_overhead_benchmark is not None or args.low_latency is not None
+                or args.engine != "reused" or args.pipeline_depth != 1):
+            parser.error("--guard-sweep requires --source pattern and cannot be combined "
+                         "with DMA/HH/other benchmark modes")
+        from guard_sweep import run_sweep
+        try:
+            run_sweep(guards_us=args.guard_us, repeats=args.guard_trials,
+                      dark_ms=args.guard_dark_ms, baseline_trials=args.guard_baseline_trials,
+                      block_size=args.block_size, timeout_ms=args.guard_timeout_ms,
+                      output_dir=args.guard_output, reset_mode=args.guard_reset_mode, test_mode=args.guard_test, rx_release_us=args.guard_rx_release_us,
+                      header_trace=args.guard_header_trace, baseline_guard_us=args.guard_baseline_us, prbs_quiet_us=args.guard_prbs_quiet_us,
+                      hold_modes=args.guard_hold_modes, hold_release_us=args.guard_hold_release_us)
+        except (ValueError, FileNotFoundError) as exc:
+            parser.error(str(exc))
+        return
     if args.ber and (args.source != "pattern" or args.memory_benchmark
                      or args.thread_overhead_benchmark is not None):
         parser.error("--ber requires --source pattern and cannot be combined with other benchmarks")
@@ -1289,94 +1452,101 @@ def main() -> None:
             ber.record(exc)
         record_error(str(exc))
 
-    with CpuIdleLatency(args.low_latency), link_class(args.h2c, args.c2h, args.timeout, **options) as link:
-        if args.low_latency is not None:
-            print(f"Low latency enabled: CPU idle exit limit {args.low_latency} us "
-                  "for this streaming session")
-        open_s = time.perf_counter() - open_started
-        output = args.output.open("wb") if args.output is not None else None
-        loop_started = time.perf_counter()
-        pipeline = (
-            link.exchange_blocks(blocks, on_mismatch=record_mismatch)
-            if args.pipeline_depth > 1 else None
-        )
-        try:
-            while True:
-                if pipeline is not None:
-                    previous_profile = link.last_profile
-                    previous_mismatches = mismatch_count
-                    started = time.perf_counter()
+    with ExitStack() as cleanup:
+        if args.link_mode:
+            from qsfp_mode_control import QSFPModeControl
+            mode_control = QSFPModeControl()
+            cleanup.callback(mode_control.close)
+            link_class = ModeOpticalLink
+            options.update(control=mode_control, mode=args.link_mode, guard_ms=args.guard_ms)
+        with CpuIdleLatency(args.low_latency), link_class(args.h2c, args.c2h, args.timeout, **options) as link:
+            if args.low_latency is not None:
+                print(f"Low latency enabled: CPU idle exit limit {args.low_latency} us "
+                      "for this streaming session")
+            open_s = time.perf_counter() - open_started
+            output = args.output.open("wb") if args.output is not None else None
+            loop_started = time.perf_counter()
+            pipeline = (
+                link.exchange_blocks(blocks, on_mismatch=record_mismatch)
+                if args.pipeline_depth > 1 else None
+            )
+            try:
+                while True:
+                    if pipeline is not None:
+                        previous_profile = link.last_profile
+                        previous_mismatches = mismatch_count
+                        started = time.perf_counter()
+                        try:
+                            block, returned = next(pipeline)
+                        except StopIteration:
+                            break
+                        finally:
+                            if args.profile and link.last_profile is not previous_profile:
+                                rows.append(dict(link.last_profile))
+                        if output is not None:
+                            output.write(returned)
+                        if ber is not None and mismatch_count == previous_mismatches:
+                            ber.record()
+                        if mismatch_count == previous_mismatches and not (args.quiet or args.profile):
+                            print(f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
+                                  f"completion_wait={(time.perf_counter() - started) * 1000:.3f} ms")
+                        continue
+                    source_started = time.perf_counter() if args.profile else 0
                     try:
-                        block, returned = next(pipeline)
+                        block = next(blocks)
                     except StopIteration:
                         break
+                    if args.profile:
+                        source_s = time.perf_counter() - source_started
+                    started = time.perf_counter()
+                    matched = True
+                    try:
+                        returned = link.exchange(block)
+                    except OpticalDataMismatch as exc:
+                        matched = False
+                        record_mismatch(block, exc)
+                        returned = exc.returned
                     finally:
-                        if args.profile and link.last_profile is not previous_profile:
-                            rows.append(dict(link.last_profile))
+                        if args.profile and link.last_profile is not None:
+                            row = dict(link.last_profile)
+                            row["source_prepare_s"] = source_s
+                            rows.append(row)
+                    elapsed = time.perf_counter() - started
+                    if ber is not None and matched:
+                        ber.record()
                     if output is not None:
                         output.write(returned)
-                    if ber is not None and mismatch_count == previous_mismatches:
-                        ber.record()
-                    if mismatch_count == previous_mismatches and not (args.quiet or args.profile):
-                        print(f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
-                              f"completion_wait={(time.perf_counter() - started) * 1000:.3f} ms")
-                    continue
-                source_started = time.perf_counter() if args.profile else 0
-                try:
-                    block = next(blocks)
-                except StopIteration:
-                    break
-                if args.profile:
-                    source_s = time.perf_counter() - source_started
-                started = time.perf_counter()
-                matched = True
-                try:
-                    returned = link.exchange(block)
-                except OpticalDataMismatch as exc:
-                    matched = False
-                    record_mismatch(block, exc)
-                    returned = exc.returned
-                finally:
-                    if args.profile and link.last_profile is not None:
-                        row = dict(link.last_profile)
-                        row["source_prepare_s"] = source_s
-                        rows.append(row)
-                elapsed = time.perf_counter() - started
-                if ber is not None and matched:
-                    ber.record()
+                    if matched and not (args.quiet or args.profile):
+                        rate = len(block) / elapsed / 1_000_000
+                        print(
+                            f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
+                            f"exchange={elapsed * 1000:.3f} ms, payload_rate={rate:.2f} MB/s"
+                        )
+            except Exception as exc:
+                record_error(f"Stream stopped after {link.sequence} completed blocks: "
+                             f"{type(exc).__name__}: {exc}")
+                if ber is not None:
+                    ber.transport_failures += 1
+                    print(f"BER run stopped: {type(exc).__name__}: {exc}", flush=True)
+                    raise SystemExit(1) from None
+                raise
+            finally:
+                wall_s = time.perf_counter() - loop_started
+                if ber is not None:
+                    summary = ber.report(args.pattern_blocks)
+                    print(summary, flush=True)
+                    if error_log is not None:
+                        error_log.write(summary + "\n")
                 if output is not None:
-                    output.write(returned)
-                if matched and not (args.quiet or args.profile):
-                    rate = len(block) / elapsed / 1_000_000
-                    print(
-                        f"Block {link.sequence - 1}: {len(block)} bytes returned intact; "
-                        f"exchange={elapsed * 1000:.3f} ms, payload_rate={rate:.2f} MB/s"
-                    )
-        except Exception as exc:
-            record_error(f"Stream stopped after {link.sequence} completed blocks: "
-                         f"{type(exc).__name__}: {exc}")
-            if ber is not None:
-                ber.transport_failures += 1
-                print(f"BER run stopped: {type(exc).__name__}: {exc}", flush=True)
-                raise SystemExit(1) from None
-            raise
-        finally:
-            wall_s = time.perf_counter() - loop_started
-            if ber is not None:
-                summary = ber.report(args.pattern_blocks)
-                print(summary, flush=True)
+                    output.close()
                 if error_log is not None:
-                    error_log.write(summary + "\n")
-            if output is not None:
-                output.close()
-            if error_log is not None:
-                try:
-                    error_log.write(f"Completed blocks: {link.sequence}; verified: "
-                                    f"{link.sequence - mismatch_count}; mismatched: {mismatch_count}\n")
-                finally:
-                    error_log.close()
-            if args.profile:
-                _profile_report(rows, wall_s, open_s, args.profile_csv)
+                    try:
+                        error_log.write(f"Completed blocks: {link.sequence}; verified: "
+                                        f"{link.sequence - mismatch_count}; mismatched: {mismatch_count}\n")
+                    finally:
+                        error_log.close()
+                if args.profile:
+                    _profile_report(rows, wall_s, open_s, args.profile_csv)
     print(f"Finished: {link.sequence} blocks; verified: {link.sequence - mismatch_count}; "
           f"mismatched: {mismatch_count}")
     if mismatch_count:

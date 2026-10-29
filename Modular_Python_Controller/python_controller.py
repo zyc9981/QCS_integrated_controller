@@ -12,6 +12,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 from optical_stream import OpticalLink, hydraharp_blocks, capture_hh_qsfp
+from qsfp_mode_ui import get_qsfp_modes
 
 from tkinter import (
     Tk,
@@ -132,32 +133,19 @@ class App(TxCommandsMixin, RxCommandsMixin):
         # steps.  Device configuration now belongs to Time Tagger X.
         self.qutag = None
         self.time_tagger = None
-        self.time_tagger_setting_channels = [1, 2, -3, -4]
+        self.time_tagger_setting_channels = [1, 2, -3, 4]
         self.time_tagger_trigger_levels = {
             1: 0.5,
             2: 0.5,
             -3: -0.15,
-            -4: -0.15,
+            4: 0.5,
         }
         self.time_tagger_channel_delays_ps = {
             1: 0,
             2: 0,
             -3: 0,
-            -4: 0,
+            4: 0,
         }
-        # self.time_tagger_setting_channels = [-1, -2, -3, -4]
-        # self.time_tagger_trigger_levels = {
-        #     -1: -0.15,
-        #     -2: -0.15,
-        #     -3: -0.15,
-        #     -4: -0.15,
-        # }
-        # self.time_tagger_channel_delays_ps = {
-        #     -1: 0,
-        #     -2: 0,
-        #     -3: 0,
-        #     -4: 0,
-        # }
         # The Counter bin width replaces QuTAG's exposure time.  Counts from
         # the Time Tagger and the HydraHarp plot are both displayed per bin.
         self.time_tagger_count_bin_width_ms = 50.0
@@ -538,6 +526,13 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self.optical_output_var = StringVar(value=str(default_path))
         Entry(output_row, textvariable=self.optical_output_var).pack(side=LEFT, fill="x", expand=True, padx=10)
 
+        mode_row = self._frame(body)
+        mode_row.pack(fill="x", pady=4)
+        modes = get_qsfp_modes(self)
+        modes.add_panel(mode_row)
+        self._label(body, "", textvariable=modes.status, wraplength=580,
+                    justify="left").pack(anchor="w")
+
         buttons = self._frame(body)
         buttons.pack(fill="x", pady=(12, 6))
         self.optical_start_button = self._button(buttons, text="Start", command=self.start_optical_capture, variant="primary")
@@ -565,6 +560,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
             messagebox.showerror("HH to QSFP", "Stop the TimeTag recording before starting optical capture.", parent=self.optical_capture_win)
             return
         try:
+            self.optical_capture_options = get_qsfp_modes(self).capture_options()
             duration_ms = int(round(float(self.optical_duration_var.get()) * 1000))
             if not 1 <= duration_ms <= 3600000:
                 raise ValueError("Duration must be between 0.001 and 3600 seconds.")
@@ -578,7 +574,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
             for device in ("/dev/xdma0_h2c_0", "/dev/xdma0_c2h_0"):
                 if not os.access(device, os.R_OK | os.W_OK):
                     raise PermissionError(f"Cannot access {device}")
-        except (ValueError, OverflowError, OSError) as exc:
+        except (ValueError, OverflowError, OSError, RuntimeError) as exc:
             messagebox.showerror("HH to QSFP", str(exc), parent=self.optical_capture_win)
             return
 
@@ -631,6 +627,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
                 progress=lambda count, byte_count: self.optical_capture_events.put(
                     ("progress", count, byte_count)
                 ),
+                **self.optical_capture_options,
             )
         except Exception as exc:
             result = {"blocks": 0, "bytes": 0, "error": str(exc), "path": output}
@@ -1936,6 +1933,15 @@ class App(TxCommandsMixin, RxCommandsMixin):
                 self.root.after(100, self._quit_all)
                 return
             self.optical_capture_active = False
+        modes = getattr(self, "qsfp_modes", None)
+        if modes is not None:
+            if modes.applying:
+                self.root.after(100, self._quit_all)
+                return
+            try:
+                modes.close()
+            except Exception as exc:
+                self.tx_log_print(f"[QSFP] Shutdown: {exc}")
         try:
             self.rx_polling = False
         except Exception:

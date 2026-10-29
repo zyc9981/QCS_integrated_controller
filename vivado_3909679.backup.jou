@@ -3,10 +3,10 @@
 # SW Build 6299465 on Fri Nov 14 12:34:56 MST 2025
 # IP Build 6300035 on Fri Nov 14 10:48:45 MST 2025
 # SharedData Build 6298862 on Thu Nov 13 04:50:51 MST 2025
-# Start of session at: Thu Oct  8 21:56:02 2026
-# Process ID         : 273883
+# Start of session at: Mon Oct 19 12:17:24 2026
+# Process ID         : 3909679
 # Current directory  : /home/zyc/QCS/QCS_integrated_controller
-# Command line       : vivado -mode batch -source /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/diagnostics/read_stream_diag.tcl
+# Command line       : vivado -mode batch -source FPGA_HH_QSFP/prbs_validation_20261019/scripts/verify_restored_controller.tcl
 # Log file           : /home/zyc/QCS/QCS_integrated_controller/vivado.log
 # Journal file       : /home/zyc/QCS/QCS_integrated_controller/vivado.jou
 # Running On         : qchip-1
@@ -19,6 +19,6 @@
 # Host memory        : 67207 MB
 # Swap memory        : 8589 MB
 # Total Virtual      : 75797 MB
-# Available Virtual  : 71488 MB
+# Available Virtual  : 68520 MB
 #-----------------------------------------------------------
-source /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/diagnostics/read_stream_diag.tcl
+source FPGA_HH_QSFP/prbs_validation_20261019/scripts/verify_restored_controller.tcl

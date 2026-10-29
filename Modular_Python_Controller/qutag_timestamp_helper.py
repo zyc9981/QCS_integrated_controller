@@ -23,6 +23,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from optical_stream import OpticalLink, hydraharp_blocks, capture_hh_qsfp
+from qsfp_mode_ui import get_qsfp_modes
 
 
 TIMETAG_UI = {
@@ -355,16 +356,15 @@ def open_qutag_timestamp_window(app):
 
     qsfp_frame = _frame(app, app.qutag_timestamp_win)
     qsfp_frame.pack(fill="x", padx=10, pady=(0, 6))
-    app.qutag_timestamp_qsfp_var = BooleanVar(value=False)
-    app.qutag_timestamp_qsfp_checkbox = _checkbutton(
-        app, qsfp_frame, text="QSFP", variable=app.qutag_timestamp_qsfp_var,
-    )
-    app.qutag_timestamp_qsfp_checkbox.pack(side="left")
+    modes = get_qsfp_modes(app)
+    app.qutag_timestamp_qsfp_var = modes.enabled
+    app.qutag_timestamp_qsfp_checkbox = modes.add_panel(qsfp_frame)
+    qsfp_status_frame = _frame(app, app.qutag_timestamp_win)
+    qsfp_status_frame.pack(fill="x", padx=10, pady=(0, 6))
     _label(
-        app, qsfp_frame,
-        text="Send HydraHarp T2 records through the QSFP loopback while recording.",
+        app, qsfp_status_frame, textvariable=modes.status,
         fg=_ui(app)["muted"],
-    ).pack(side="left", padx=(8, 0))
+    ).pack(anchor="w")
 
     status_frame = _frame(app, app.qutag_timestamp_win)
     status_frame.pack(fill="x", padx=10, pady=(0, 6))
@@ -691,6 +691,7 @@ def _start_timestamp_writing(app):
     qsfp_output = Path(filename).with_suffix(".qsfp.bin") if qsfp_requested else None
     if qsfp_requested:
         try:
+            app.qutag_timestamp_qsfp_options = get_qsfp_modes(app).capture_options()
             if hydraharp is None:
                 raise RuntimeError("HydraHarp is not connected; QSFP needs HydraHarp T2 records.")
             if qsfp_output.exists():
@@ -698,7 +699,7 @@ def _start_timestamp_writing(app):
             for device in ("/dev/xdma0_h2c_0", "/dev/xdma0_c2h_0"):
                 if not os.access(device, os.R_OK | os.W_OK):
                     raise PermissionError(f"Cannot access {device}")
-        except (RuntimeError, OSError) as exc:
+        except (RuntimeError, OSError, ValueError, OverflowError) as exc:
             messagebox.showerror("Time Stamps", str(exc), parent=app.qutag_timestamp_win)
             return
 
@@ -970,6 +971,7 @@ def _run_qsfp_stream(app, hydraharp, output_path):
         app.qutag_timestamp_qsfp_result = capture_hh_qsfp(
             hydraharp, 0, output_path, app.qutag_timestamp_qsfp_stop,
             started=True, progress=progress,
+            **app.qutag_timestamp_qsfp_options,
         )
     except Exception as exc:
         # Includes file-creation failures before acquisition can be drained.
@@ -1071,7 +1073,10 @@ def _stop_timestamp_writing(app):
             app.qutag_timestamp_preparing_hydraharp = False
             app.qutag_timestamp_size_poll_active = False
             _set_timestamp_recording_indicator(app, False)
-            app.qutag_timestamp_status_var.set("Stopping QSFP and draining the final HydraHarp blocks...")
+            burst = getattr(app, "qutag_timestamp_qsfp_options", {}).get("mode") == "burst"
+            app.qutag_timestamp_status_var.set(
+                "Finishing HH capture and transmitting the saved QSFP batch..." if burst else
+                "Stopping QSFP and draining the final HydraHarp blocks...")
             app.root.after(100, lambda: _stop_timestamp_writing(app))
             return
 
