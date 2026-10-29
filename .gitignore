@@ -25,6 +25,7 @@ __pycache__/
 *.mat
 *.npy
 *.npz
+*.ttbin
 
 # Archives
 *.zip
