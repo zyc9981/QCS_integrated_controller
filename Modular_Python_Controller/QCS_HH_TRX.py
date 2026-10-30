@@ -262,6 +262,7 @@ class Service:
     def __init__(self, args, source):
         self.args, self.source = args, source
         self.stop = threading.Event()
+        self.capture_stop = threading.Event()
         self.lock = threading.Lock()
         self.send_lock = threading.Lock()
         self.active = None
@@ -290,6 +291,7 @@ class Service:
                     path = Path(self.args.spool_dir) / (sid + '.bin')
                     file = path.open('xb')
                     self.seen.add(sid)
+                    self.capture_stop.clear()
                     self.active = sid
                     response = {'type':'ACCEPTED', 'id':sid}
                     threading.Thread(target=self.record, args=(sid, duration, path, file), daemon=True).start()
@@ -309,7 +311,7 @@ class Service:
             if not ready.wait(self.args.timeout + 2) or not state.get('ready'):
                 raise Error('data receiver not ready; capture was not started')
             state['start_unix'] = time.time()
-            state['capture'] = self.source.capture(duration, spool, self.stop)
+            state['capture'] = self.source.capture(duration, spool, self.capture_stop)
             state['stop_unix'] = time.time()
         except Exception as exc:
             state['capture'] = 'failed' if state['start_unix'] else 'not_started'
@@ -341,6 +343,12 @@ class Service:
             self.active = None
         if not self.stop.is_set():
             self.notify({'type':'READY', 'device':self.source.metadata})
+    def stop_capture(self, sid):
+        with self.lock:
+            if self.active == sid and self.active is not None:
+                self.capture_stop.set()
+                return True
+        return False
     def run(self):
         q = start_console()
         while not self.stop.is_set():
@@ -365,6 +373,10 @@ class Service:
                             conn.settimeout(0.25)
                             if msg.get('type') == 'RECORD':
                                 self.request(msg)
+                            elif msg.get('type') == 'STOP':
+                                stopped = self.stop_capture(msg.get('id'))
+                                self.notify({'type':'STOPPING', 'id':msg.get('id'),
+                                             'active_match':stopped})
                             else:
                                 self.notify({'type':'ERROR', 'message':'unknown control command'})
             except (OSError, Error, ValueError) as exc:
@@ -379,6 +391,7 @@ class Service:
         with self.lock:
             active = self.active
         if active:
+            self.capture_stop.set()
             print('Stopping active recording; waiting for drain and transfer', flush=True)
             deadline = time.monotonic() + self.args.shutdown_timeout + 5
             while time.monotonic() < deadline:
@@ -394,7 +407,8 @@ class Service:
                             break
                     time.sleep(0.1)
         self.source.close()
-def receive_data(listener, output, part_file, manifest, sid, timeout, max_bytes, duration):
+def receive_data(listener, output, part_file, manifest, sid, timeout, max_bytes, duration,
+                 progress=None, connected=None, quiet=False):
     info = {'status':'incomplete', 'request_id':sid, 'bytes_saved':0, 'blocks_saved':0,
             'output':str(output), 'format':FORMAT}
     digest = hashlib.sha256()
@@ -402,6 +416,8 @@ def receive_data(listener, output, part_file, manifest, sid, timeout, max_bytes,
         listener.settimeout(timeout)
         conn, peer = listener.accept()
         with conn, part_file:
+            if connected:
+                connected(conn)
             conn.settimeout(timeout)
             hello = read_json(conn)
             block = hello.get('block_size')
@@ -436,6 +452,8 @@ def receive_data(listener, output, part_file, manifest, sid, timeout, max_bytes,
                 digest.update(data)
                 info['bytes_saved'] += size
                 info['blocks_saved'] += 1
+                if progress:
+                    progress(info['bytes_saved'], info['blocks_saved'])
             end = read_json(conn)
             if (end.get('type') != 'END' or end.get('session') != stream_id or
                 end.get('bytes') != info['bytes_saved'] or end.get('blocks') != info['blocks_saved'] or
@@ -460,7 +478,9 @@ def receive_data(listener, output, part_file, manifest, sid, timeout, max_bytes,
             print('Metadata write failed: %s' % error, flush=True)
     finally:
         listener.close()
-        print('Data result: %s' % json.dumps(info), flush=True)
+        if not quiet:
+            print('Data result: %s' % json.dumps(info), flush=True)
+    return info
 
 
 def coordinator(args):

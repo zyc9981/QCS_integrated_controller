@@ -1,4 +1,5 @@
 import collections
+import math
 import os
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from optical_stream import OpticalLink, hydraharp_blocks, capture_hh_qsfp
 from qsfp_mode_ui import get_qsfp_modes
+from internet_timetag import InternetCoordinator
 
 
 TIMETAG_UI = {
@@ -212,8 +214,8 @@ def open_qutag_timestamp_window(app):
 
     app.qutag_timestamp_win = Toplevel(app.tx_win)
     app.qutag_timestamp_win.title("Time Stamps")
-    app.qutag_timestamp_win.geometry("900x780")
-    app.qutag_timestamp_win.minsize(820, 700)
+    app.qutag_timestamp_win.geometry("1000x880")
+    app.qutag_timestamp_win.minsize(900, 820)
     _style_window(app, app.qutag_timestamp_win)
     app.qutag_timestamp_writing = False
     app.qutag_timestamp_preparing_hydraharp = False
@@ -290,6 +292,8 @@ def open_qutag_timestamp_window(app):
     app.qutag_timestamp_size_poll_active = False
     app.qutag_timestamp_duration_limit_s = None
     app.qutag_timestamp_start_monotonic = None
+    app.qutag_timestamp_stop_monotonic = None
+    app.qutag_timestamp_finish_after_id = None
     app.qutag_timestamp_elapsed_s = 0.0
     app.qutag_timestamp_trigger_repeating = False
     app.qutag_timestamp_trigger_after_id = None
@@ -365,6 +369,43 @@ def open_qutag_timestamp_window(app):
         app, qsfp_status_frame, textvariable=modes.status,
         fg=_ui(app)["muted"],
     ).pack(anchor="w")
+
+    internet_frame = _frame(app, app.qutag_timestamp_win)
+    internet_frame.pack(fill="x", padx=10, pady=(0, 6))
+    app.qutag_timestamp_internet_var = BooleanVar(value=False)
+    app.qutag_timestamp_internet_checkbox = _checkbutton(
+        app, internet_frame, text="Internet", variable=app.qutag_timestamp_internet_var,
+        command=lambda: _toggle_timestamp_internet(app))
+    app.qutag_timestamp_internet_checkbox.pack(side="left")
+    app.qutag_timestamp_internet_entries = []
+    for label, name, default, width in (
+        ("Bind:", "bind", "0.0.0.0", 15),
+        ("Control port:", "control_port", "50051", 7),
+        ("Data port:", "data_port", "50050", 7),
+    ):
+        _label(app, internet_frame, text=label).pack(side="left", padx=(10, 4))
+        var = StringVar(value=default)
+        setattr(app, f"qutag_timestamp_internet_{name}_var", var)
+        entry = _entry(app, internet_frame, textvariable=var, width=width)
+        entry.pack(side="left")
+        app.qutag_timestamp_internet_entries.append(entry)
+    internet_status_frame = _frame(app, app.qutag_timestamp_win)
+    internet_status_frame.pack(fill="x", padx=10, pady=(0, 6))
+    app.qutag_timestamp_internet_status_var = StringVar(value="Internet disabled")
+    app.qutag_timestamp_internet_size_var = StringVar(value="Internet file: 0 B")
+    app.qutag_timestamp_internet_speed_var = StringVar(value="Internet speed: 0.00 MB/s")
+    _label(app, internet_status_frame, textvariable=app.qutag_timestamp_internet_status_var,
+           fg=_ui(app)["muted"]).pack(anchor="w")
+    internet_metrics = _frame(app, internet_status_frame)
+    internet_metrics.pack(fill="x")
+    for var in (app.qutag_timestamp_internet_size_var, app.qutag_timestamp_internet_speed_var):
+        _label(app, internet_metrics, textvariable=var, fg=_ui(app)["muted"]).pack(
+            side="left", padx=(0, 16))
+    app.qutag_timestamp_internet_stopping = False
+    app.qutag_timestamp_internet_requested = False
+    app.qutag_timestamp_internet_stop_after_id = None
+    app.qutag_timestamp_internet_sample = (time.monotonic(), 0)
+    _poll_timestamp_internet(app)
 
     status_frame = _frame(app, app.qutag_timestamp_win)
     status_frame.pack(fill="x", padx=10, pady=(0, 6))
@@ -510,6 +551,75 @@ def open_qutag_timestamp_window(app):
 
     app.qutag_timestamp_win.protocol("WM_DELETE_WINDOW", lambda: _close_timestamp_window(app))
     _poll_qutag_counts(app)
+
+
+def _timestamp_internet_enabled(app):
+    var = getattr(app, "qutag_timestamp_internet_var", None)
+    return bool(var is not None and var.get())
+
+
+def _timestamp_internet_active(app):
+    coordinator = getattr(app, "timestamp_internet", None)
+    return bool(coordinator is not None and coordinator.snapshot()["active"])
+
+
+def _toggle_timestamp_internet(app):
+    if (getattr(app, "qutag_timestamp_writing", False)
+            or getattr(app, "qutag_timestamp_preparing_hydraharp", False)
+            or _timestamp_internet_active(app)):
+        app.qutag_timestamp_internet_var.set(getattr(app, "timestamp_internet", None) is not None)
+        return
+    previous = getattr(app, "timestamp_internet", None)
+    if previous is not None:
+        previous.close()
+        app.timestamp_internet = None
+    if _timestamp_internet_enabled(app):
+        try:
+            control = int(app.qutag_timestamp_internet_control_port_var.get())
+            data = int(app.qutag_timestamp_internet_data_port_var.get())
+            if not (1 <= control <= 65535 and 1 <= data <= 65535) or control == data:
+                raise ValueError("Choose two distinct ports between 1 and 65535")
+            app.timestamp_internet = InternetCoordinator(
+                app.qutag_timestamp_internet_bind_var.get().strip(), control, data)
+        except (ValueError, OSError) as exc:
+            app.qutag_timestamp_internet_var.set(False)
+            app.qutag_timestamp_internet_status_var.set(f"Internet settings error: {exc}")
+            return
+    else:
+        app.qutag_timestamp_internet_status_var.set("Internet disabled")
+    for entry in app.qutag_timestamp_internet_entries:
+        entry.configure(state="disabled" if _timestamp_internet_enabled(app) else "normal")
+
+
+def _poll_timestamp_internet(app):
+    window = getattr(app, "qutag_timestamp_win", None)
+    if window is None or not window.winfo_exists():
+        return
+    coordinator = getattr(app, "timestamp_internet", None)
+    busy = (getattr(app, "qutag_timestamp_writing", False)
+            or getattr(app, "qutag_timestamp_preparing_hydraharp", False)
+            or _timestamp_internet_active(app))
+    app.qutag_timestamp_internet_checkbox.configure(state="disabled" if busy else "normal")
+    if coordinator is not None:
+        state = coordinator.snapshot()
+        app.qutag_timestamp_internet_status_var.set(state["status"])
+        app.qutag_timestamp_internet_size_var.set(
+            f"Internet file: {_format_byte_size(state['bytes'])}")
+        now = time.monotonic()
+        last_time, last_size = app.qutag_timestamp_internet_sample
+        rate = max(0, state["bytes"] - last_size) / max(now - last_time, 1e-6) / 1e6
+        if state["finished"] is not None and state["started"] is not None:
+            rate = state["bytes"] / max(state["finished"] - state["started"], 1e-6) / 1e6
+        app.qutag_timestamp_internet_speed_var.set(
+            f"Internet speed: {rate:.2f} MB/s" + (" (average)" if state["finished"] else ""))
+        app.qutag_timestamp_internet_sample = (now, state["bytes"])
+        if (state["result"] is not None and not state["active"]
+                and getattr(app, "qutag_timestamp_internet_requested", False)
+                and not getattr(app, "qutag_timestamp_internet_stopping", False)
+                and getattr(app, "qutag_timestamp_writing", False)):
+            _stop_timestamp_writing(app)
+    if window.winfo_exists():
+        window.after(250, lambda: _poll_timestamp_internet(app))
 
 
 def _trigger_arduino(app, force_on=False):
@@ -687,6 +797,18 @@ def _start_timestamp_writing(app):
     app.qutag_timestamp_qsfp_result = None
     app.qutag_timestamp_stop_errors = []
     qsfp_requested = bool(app.qutag_timestamp_qsfp_var.get())
+    internet_requested = _timestamp_internet_enabled(app)
+    if internet_requested:
+        coordinator = getattr(app, "timestamp_internet", None)
+        if coordinator is None or not coordinator.snapshot()["ready"] or _timestamp_internet_active(app):
+            messagebox.showerror("Time Stamps", "Internet Windows service is not ready.",
+                                 parent=app.qutag_timestamp_win)
+            return
+        output = Path(filename).with_suffix(".internet.bin")
+        if any(Path(str(output) + suffix).exists() for suffix in ("", ".part", ".json")):
+            messagebox.showerror("Time Stamps", f"Internet output already exists: {output}",
+                                 parent=app.qutag_timestamp_win)
+            return
     hydraharp = getattr(app, "hydraharp", None)
     qsfp_output = Path(filename).with_suffix(".qsfp.bin") if qsfp_requested else None
     if qsfp_requested:
@@ -726,6 +848,16 @@ def _start_timestamp_writing(app):
             return
     else:
         app.qutag_timestamp_duration_limit_s = None
+
+    if internet_requested and app.qutag_timestamp_duration_limit_s is not None:
+        duration = app.qutag_timestamp_duration_limit_s
+        if not 0.001 <= duration <= 3600:
+            messagebox.showerror("Time Stamps", "Internet duration must be 0.001..3600 seconds.",
+                                 parent=app.qutag_timestamp_win)
+            return
+    app.qutag_timestamp_internet_requested = internet_requested
+    app.qutag_timestamp_internet_output = Path(filename).with_suffix(".internet.bin")
+    app.qutag_timestamp_internet_stopping = False
 
     app.qutag_timestamp_format = "ttbin"
 
@@ -857,6 +989,26 @@ def _start_timestamp_recording(app):
         )
         return
 
+    if getattr(app, "qutag_timestamp_internet_requested", False):
+        try:
+            app.timestamp_internet.record(
+                app.qutag_timestamp_internet_output,
+                duration=getattr(app, "qutag_timestamp_duration_limit_s", None) or 3600)
+            app.qutag_timestamp_internet_sample = (time.monotonic(), 0)
+        except Exception as exc:
+            try:
+                app.time_tagger_file_writer.stop()
+            except Exception as cleanup_exc:
+                app.tx_log_print(f"[TimeTag] Writer cleanup failed: {cleanup_exc}")
+            finally:
+                app.time_tagger_file_writer = None
+            app.qutag_timestamp_preparing_hydraharp = False
+            app.qutag_timestamp_qsfp_checkbox.configure(state="normal")
+            if use_hydraharp:
+                _stop_raw_and_resume_trace(app, hydraharp)
+            messagebox.showerror("Time Stamps", f"Cannot start Internet recording: {exc}", parent=window)
+            return
+
     if qsfp_requested:
         app.qutag_timestamp_qsfp_stop.clear()
         app.qutag_timestamp_qsfp_result = None
@@ -875,6 +1027,8 @@ def _start_timestamp_recording(app):
         except Exception as exc:
             app.qutag_timestamp_qsfp_active = False
             app.qutag_timestamp_qsfp_worker = None
+            if getattr(app, "qutag_timestamp_internet_requested", False):
+                app.timestamp_internet.stop_recording()
             cleanup_errors = []
             try:
                 app.time_tagger_file_writer.stop()
@@ -902,6 +1056,7 @@ def _start_timestamp_recording(app):
     app.qutag_timestamp_writing = True
     app.qutag_timestamp_written_path = filename
     app.qutag_timestamp_start_monotonic = time.monotonic()
+    app.qutag_timestamp_stop_monotonic = None
     app.qutag_timestamp_elapsed_s = 0.0
     _set_timestamp_recording_indicator(app, True)
     _update_timestamp_elapsed(app)
@@ -946,6 +1101,12 @@ def _start_timestamp_recording(app):
         )
         app.qutag_timestamp_trigger_stop_after_id = app.qutag_timestamp_win.after(
             trigger_stop_delay_ms, stop_recording_trigger_early
+        )
+        # Use a dedicated finish timer rather than depending on the 500 ms
+        # file-size poll to notice that the recording deadline has passed.
+        app.qutag_timestamp_finish_after_id = app.qutag_timestamp_win.after(
+            max(1, int(round(float(duration_limit_s) * 1000))),
+            lambda: _finish_timed_timestamp_recording(app),
         )
     if use_hydraharp:
         app.qutag_timestamp_status_var.set(
@@ -1031,11 +1192,20 @@ def _stop_raw_and_resume_trace(app, hydraharp):
     return True
 
 
+def _finish_timed_timestamp_recording(app):
+    app.qutag_timestamp_finish_after_id = None
+    if (getattr(app, "qutag_timestamp_writing", False)
+            and getattr(app, "qutag_timestamp_stop_monotonic", None) is None):
+        _stop_timestamp_writing(app)
+
+
 def _stop_timestamp_writing(app):
     window = getattr(app, "qutag_timestamp_win", None)
     for timer_attribute in (
         "qutag_timestamp_trigger_after_id",
         "qutag_timestamp_trigger_stop_after_id",
+        "qutag_timestamp_internet_stop_after_id",
+        "qutag_timestamp_finish_after_id",
     ):
         timer_id = getattr(app, timer_attribute, None)
         if timer_id is not None and window is not None and window.winfo_exists():
@@ -1053,6 +1223,13 @@ def _stop_timestamp_writing(app):
     if not (time_tagger_writing or hydraharp_recording or preparing_hydraharp):
         return
 
+    # Draining Internet data can outlast acquisition. Freeze the displayed
+    # recording time at the first stop request, while transfer checks continue.
+    if getattr(app, "qutag_timestamp_stop_monotonic", None) is None:
+        app.qutag_timestamp_stop_monotonic = time.monotonic()
+    _update_timestamp_elapsed(app)
+    _set_timestamp_recording_indicator(app, False)
+
     errors = getattr(app, "qutag_timestamp_stop_errors", [])
     file_writer = getattr(app, "time_tagger_file_writer", None)
     if time_tagger_writing and file_writer is not None:
@@ -1061,6 +1238,23 @@ def _stop_timestamp_writing(app):
         except Exception as exc:
             errors.append(f"Time Tagger X: {exc}")
     app.time_tagger_file_writer = None
+
+    if _timestamp_internet_active(app):
+        if not getattr(app, "qutag_timestamp_internet_stopping", False):
+            app.timestamp_internet.stop_recording()
+            app.qutag_timestamp_internet_stopping = True
+        app.qutag_timestamp_stop_errors = errors
+        app.qutag_timestamp_status_var.set("Waiting for Internet recording to stop and verify...")
+        app.qutag_timestamp_internet_stop_after_id = app.root.after(
+            100, lambda: _stop_timestamp_writing(app))
+        return
+    if getattr(app, "qutag_timestamp_internet_requested", False):
+        coordinator = getattr(app, "timestamp_internet", None)
+        result = coordinator.snapshot()["result"] if coordinator else None
+        if result and result["status"] != "complete":
+            errors.append("Internet: " + result.get("error", "incomplete transfer"))
+        app.qutag_timestamp_internet_requested = False
+        app.qutag_timestamp_internet_stopping = False
 
     qsfp_active = getattr(app, "qutag_timestamp_qsfp_active", False)
     if qsfp_active:
@@ -1112,7 +1306,8 @@ def _stop_timestamp_writing(app):
 
     start_monotonic = getattr(app, "qutag_timestamp_start_monotonic", None)
     if start_monotonic is not None:
-        app.qutag_timestamp_elapsed_s = max(0.0, time.monotonic() - float(start_monotonic))
+        app.qutag_timestamp_elapsed_s = max(
+            0.0, app.qutag_timestamp_stop_monotonic - float(start_monotonic))
 
     app.qutag_timestamp_writing = False
     app.qutag_timestamp_preparing_hydraharp = False
@@ -1150,6 +1345,10 @@ def _stop_timestamp_writing(app):
         _start_hydraharp_h5_conversion(app)
     if getattr(app, "qutag_timestamp_close_pending", False):
         app.qutag_timestamp_close_pending = False
+        coordinator = getattr(app, "timestamp_internet", None)
+        if coordinator is not None:
+            coordinator.close()
+            app.timestamp_internet = None
         if window is not None and window.winfo_exists():
             window.destroy()
 
@@ -1309,8 +1508,8 @@ def _parse_duration_limit_text(text):
     except ValueError as exc:
         raise ValueError("Auto-stop time must be a number of seconds.") from exc
 
-    if duration_s <= 0:
-        raise ValueError("Auto-stop time must be greater than 0 seconds.")
+    if not math.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("Auto-stop time must be a finite number greater than 0 seconds.")
 
     return duration_s
 
@@ -1347,7 +1546,9 @@ def _update_timestamp_elapsed(app):
         if start_monotonic is None:
             elapsed_s = 0.0
         else:
-            elapsed_s = max(0.0, time.monotonic() - float(start_monotonic))
+            stopped = getattr(app, "qutag_timestamp_stop_monotonic", None)
+            elapsed_s = max(0.0, (time.monotonic() if stopped is None else stopped)
+                            - float(start_monotonic))
         app.qutag_timestamp_elapsed_s = elapsed_s
     else:
         elapsed_s = max(0.0, float(getattr(app, "qutag_timestamp_elapsed_s", 0.0)))
@@ -1425,6 +1626,9 @@ def _poll_timestamp_file_size(app):
 
         byte_count = _update_timestamp_file_size(app)
         elapsed_s = _update_timestamp_elapsed(app)
+        if getattr(app, "qutag_timestamp_stop_monotonic", None) is not None:
+            app.qutag_timestamp_size_poll_active = False
+            return
 
         if (
             getattr(app, "qutag_timestamp_writing", False)
@@ -1449,12 +1653,7 @@ def _poll_timestamp_file_size(app):
             start_monotonic = getattr(app, "qutag_timestamp_start_monotonic", None)
             if duration_limit_s is not None and start_monotonic is not None:
                 if elapsed_s >= float(duration_limit_s):
-                    _stop_timestamp_writing(app)
-                    app.qutag_timestamp_status_var.set(
-                        "Auto-stopped timestamp writing after "
-                        f"{_format_duration_s(elapsed_s)} "
-                        f"(limit {_format_duration_s(duration_limit_s)})."
-                    )
+                    _finish_timed_timestamp_recording(app)
                     return
 
         if getattr(app, "qutag_timestamp_writing", False):
@@ -1824,7 +2023,7 @@ def _close_timestamp_window(app):
         or getattr(app, "qutag_timestamp_preparing_hydraharp", False)
     ):
         _stop_timestamp_writing(app)
-        if getattr(app, "qutag_timestamp_qsfp_active", False):
+        if getattr(app, "qutag_timestamp_qsfp_active", False) or _timestamp_internet_active(app):
             app.qutag_timestamp_close_pending = True
             return
     else:
@@ -1832,6 +2031,10 @@ def _close_timestamp_window(app):
         # TimeTag window is closed without a recording session.
         _stop_recording_triggers(app)
 
+    coordinator = getattr(app, "timestamp_internet", None)
+    if coordinator is not None:
+        coordinator.close()
+        app.timestamp_internet = None
     window = getattr(app, "qutag_timestamp_win", None)
     if window is not None and window.winfo_exists():
         window.destroy()

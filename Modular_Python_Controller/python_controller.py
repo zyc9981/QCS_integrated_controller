@@ -52,11 +52,15 @@ except Exception:
     TimeTagger = None
     print("Time Tagger X import failed.")
 
-try:
-    from picoquant_snapi import LogLevel, MeasMode, RefSource, create_hydraharp_api
-except Exception as exc:
-    LogLevel = MeasMode = RefSource = create_hydraharp_api = None
-    print(f"HydraHarp snAPI import failed: {exc}")
+# Keep the HydraHarp settings and QSFP code for later use, but do not load
+# its SDK or open the device while it is disabled.
+ENABLE_HYDRAHARP = False
+LogLevel = MeasMode = RefSource = create_hydraharp_api = None
+if ENABLE_HYDRAHARP:
+    try:
+        from picoquant_snapi import LogLevel, MeasMode, RefSource, create_hydraharp_api
+    except Exception as exc:
+        print(f"HydraHarp snAPI import failed: {exc}")
 
 LASER_HOST = "192.168.1.200"
 TX_PORT = "/dev/ttyACM0"
@@ -275,6 +279,9 @@ class App(TxCommandsMixin, RxCommandsMixin):
         # Keep that state explicit before attempting discovery, so any failed
         # initialization leaves all later code treating it as unavailable.
         self.hydraharp = None
+        if not ENABLE_HYDRAHARP:
+            print("HydraHarp disabled; continuing without it.")
+            return False
         if create_hydraharp_api is None:
             print("HydraHarp unavailable: snAPI wrapper import failed.")
             return False
@@ -1926,6 +1933,14 @@ class App(TxCommandsMixin, RxCommandsMixin):
         if getattr(self, "qutag_timestamp_qsfp_active", False):
             self.root.after(100, self._quit_all)
             return
+        internet = getattr(self, "timestamp_internet", None)
+        if internet is not None:
+            if internet.snapshot()["active"]:
+                internet.stop_recording()
+                self.root.after(100, self._quit_all)
+                return
+            internet.close()
+            self.timestamp_internet = None
         if self.optical_capture_active:
             self.optical_capture_stop.set()
             worker = self.optical_capture_thread
