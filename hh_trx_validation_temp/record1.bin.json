@@ -1,0 +1,13 @@
+{
+  "status": "complete",
+  "request_id": "8e349682eacb4326a2bf2b3e4bae2540",
+  "bytes_saved": 7168,
+  "blocks_saved": 7,
+  "output": "C:\\Yichi Zhang\\QCS\\integrated_controller\\hh_trx_validation_temp\\record1.bin",
+  "format": "hydraharp400_t2_raw_le_u32",
+  "peer": "('127.0.0.1', 54483)",
+  "stream_session": "a4c869e4152d45b58629020bae8337cd",
+  "block_size": 1024,
+  "records_saved": 1792,
+  "sha256": "0e14f7a57bf7519140f9e0004ca860f1ea2d648b78d9922bbccd873fc12bd240"
+}

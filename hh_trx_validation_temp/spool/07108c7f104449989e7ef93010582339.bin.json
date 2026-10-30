@@ -1,0 +1,112 @@
+{
+  "id": "07108c7f104449989e7ef93010582339",
+  "requested_duration_seconds": 1.0,
+  "local_path": "C:\\Yichi Zhang\\QCS\\integrated_controller\\hh_trx_validation_temp\\spool\\07108c7f104449989e7ef93010582339.bin",
+  "capture": "completed",
+  "transfer": "complete",
+  "linux_saved": "verified",
+  "source": {
+    "device": "HydraHarp 400",
+    "device_id": "1047885",
+    "mode": "T2",
+    "base_resolution_ps": 1.0,
+    "resolution_ps": 1.0,
+    "device_config": {
+      "DeviceType": 0,
+      "FileDevicePath": "",
+      "ID": "1047885",
+      "Index": 0,
+      "Model": "HydraHarp 400",
+      "PartNo": "930020",
+      "Version": "2.0",
+      "BaseResolution": 1.0,
+      "Resolution": 1.0,
+      "BinSteps": 26,
+      "NumChans": 2,
+      "NumMods": 3,
+      "SyncDivider": 1,
+      "SyncTrigMode": "CFD",
+      "SyncDiscrLvl": 50,
+      "SyncZeroxLvL": 20,
+      "SyncChannelOffset": 0,
+      "SyncChannelEnable": 1,
+      "SyncDeadTime": 0,
+      "HystCode": 0,
+      "TimingMode": 0,
+      "StopCount": 0,
+      "Binning": 0,
+      "Offset": 0,
+      "LengthCode": 6,
+      "NumBins": 65536,
+      "MeasCtrl": 0,
+      "StartEdge": 0,
+      "StopEdge": 0,
+      "TriggerOutput": 0,
+      "MarkerHoldoffTime": 0,
+      "HoldTime": 2,
+      "OflCompression": 2,
+      "MarkerEdges": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "MarkerEna": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "ModsCfg": [
+        {
+          "Index": 0,
+          "ModelCode": 1000,
+          "VersionCode": 51052545
+        },
+        {
+          "Index": 1,
+          "ModelCode": 1010,
+          "VersionCode": 33554954
+        },
+        {
+          "Index": 2,
+          "ModelCode": 1040,
+          "VersionCode": 18219530
+        }
+      ],
+      "ChansCfg": [
+        {
+          "Index": 0,
+          "TrigMode": "CFD",
+          "DiscrLvl": 50,
+          "ZeroXLvl": 20,
+          "ChanOffs": 0,
+          "ChanEna": 1,
+          "DeadTime": 0
+        },
+        {
+          "Index": 1,
+          "TrigMode": "CFD",
+          "DiscrLvl": 50,
+          "ZeroXLvl": 20,
+          "ChanOffs": 0,
+          "ChanEna": 1,
+          "DeadTime": 0
+        }
+      ],
+      "MeasMode": 2,
+      "RefSource": 0
+    },
+    "device_loss_status": "unknown; no automatic overrun detection; inspect snAPI console or log",
+    "reference_source": "Internal",
+    "configuration_note": "no separate channel setters called by service; initialization may apply SDK settings; values are SDK readback"
+  },
+  "start_unix": 1793326152.960776,
+  "stop_unix": 1793326154.0401306,
+  "ready": true,
+  "sent_bytes": 92,
+  "sha256": "32bc66fc2e110a5cbeaf1978966fbdfa60f3b063f06d8b76df3ba9dfd994b214",
+  "bytes_captured": 92,
+  "records_captured": 23,
+  "local_sha256": "32bc66fc2e110a5cbeaf1978966fbdfa60f3b063f06d8b76df3ba9dfd994b214"
+}

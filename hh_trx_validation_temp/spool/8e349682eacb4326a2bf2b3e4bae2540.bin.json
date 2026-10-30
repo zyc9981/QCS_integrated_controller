@@ -1,0 +1,22 @@
+{
+  "id": "8e349682eacb4326a2bf2b3e4bae2540",
+  "requested_duration_seconds": 0.2,
+  "local_path": "C:\\Yichi Zhang\\QCS\\integrated_controller\\hh_trx_validation_temp\\spool\\8e349682eacb4326a2bf2b3e4bae2540.bin",
+  "capture": "completed",
+  "transfer": "complete",
+  "linux_saved": "verified",
+  "source": {
+    "device": "simulated",
+    "mode": "T2",
+    "base_resolution": null,
+    "device_loss_status": "not applicable to simulated source"
+  },
+  "start_unix": 1793326061.3772986,
+  "stop_unix": 1793326061.5924945,
+  "ready": true,
+  "sent_bytes": 7168,
+  "sha256": "0e14f7a57bf7519140f9e0004ca860f1ea2d648b78d9922bbccd873fc12bd240",
+  "bytes_captured": 7168,
+  "records_captured": 1792,
+  "local_sha256": "0e14f7a57bf7519140f9e0004ca860f1ea2d648b78d9922bbccd873fc12bd240"
+}

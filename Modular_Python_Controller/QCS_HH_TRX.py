@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 r"""Persistent HH acquisition prototype: Windows service and Linux coordinator.
 
 Linux:   python3 QCS_HH_TRX.py coordinator --bind 0.0.0.0
@@ -6,9 +6,9 @@ Windows: python QCS_HH_TRX.py service --host 158.130.30.167 --source simulate
 Linux prompt: record 10 /home/zyc/QCS/hh_trial01.bin
 Windows prompt: exit
 
-Real hardware mode is disabled pending SDK loss reporting and hardware validation.
-This experimental prototype is NOT yet suitable for real measurements: the
-SDK's documented overrun warning is not exposed as a reliable Python status.
+Real hardware mode is experimental. The SDK's documented raw-buffer overrun
+warning is not exposed as a reliable Python status. Check the SDK logs; matching
+network hashes do not prove that the acquisition lost no records.
 See --help. Data port 50050 and control port 50051 are separate TCP listeners.
 """
 import argparse
@@ -160,11 +160,16 @@ class Hardware:
             self.opened = True
             if not api.initDevice(MeasMode.T2, refSrc=RefSource.Internal):
                 raise Error('HydraHarp T2 initialization failed')
-            self.metadata = {'device': 'HydraHarp 400', 'mode': 'T2',
-                             'device_config': dict(api.deviceConfig),
-                             'device_loss_status': 'unavailable; inspect snAPI log for overrun warnings',
+            config = dict(api.deviceConfig)
+            self.metadata = {'device': config.get('Model', 'unavailable'),
+                             'device_id': config.get('ID', 'unavailable'), 'mode': 'T2',
+                             'base_resolution_ps': config.get('BaseResolution'),
+                             'resolution_ps': config.get('Resolution'),
+                             'device_config': config,
+                             'device_loss_status': 'unknown; no automatic overrun detection; inspect snAPI console or log',
                              'reference_source': 'Internal',
-                             'configuration_note': 'SDK/device defaults; no channel configuration applied'}
+                             'configuration_note': 'no separate channel setters called by service; initialization may apply SDK settings; values are SDK readback'}
+            json.dumps(self.metadata, allow_nan=False)
         except BaseException:
             self.close()
             raise
@@ -173,17 +178,25 @@ class Hardware:
         if not api.raw.startBlock(int(duration * 1000), size=1048576, savePTU=False):
             raise Error('raw.startBlock failed')
         stopping = False
-        while True:
-            if stop.is_set() and not stopping:
+        try:
+            while True:
+                if stop.is_set() and not stopping:
+                    api.raw.stopMeasure()
+                    stopping = True
+                finished = api.raw.isFinished()
+                block = api.raw.getBlock()
+                if len(block):
+                    spool.append(block.astype('<u4', copy=False).tobytes())
+                if finished:
+                    break
+                time.sleep(0.01)
+        except BaseException:
+            # Do not leave the native acquisition running on a Python error.
+            try:
                 api.raw.stopMeasure()
-                stopping = True
-            finished = api.raw.isFinished()
-            block = api.raw.getBlock()
-            if len(block):
-                spool.append(block.astype('<u4', copy=False).tobytes())
-            if finished:
-                break
-            time.sleep(0.01)
+            except Exception:
+                pass
+            raise
         return 'stopped_by_operator' if stopping else 'completed'
     def close(self):
         if self.api is not None and self.opened:
@@ -196,7 +209,9 @@ def stream_send(host, port, session, spool, path, block, timeout, ready_event, s
         with socket.create_connection((host, port), timeout) as sock:
             sock.settimeout(timeout)
             send_json(sock, {'type':'HELLO', 'version':2, 'format':FORMAT, 'record_bytes':4,
-                             'block_size':block, 'metadata':{'request_id':session}})
+                             'block_size':block, 'metadata':{'request_id':session,
+                                 'requested_duration_seconds':state['requested_duration_seconds'],
+                                 'source':state['source']}})
             ready = read_json(sock)
             sid = ready.get('session')
             if (ready.get('type') != 'READY' or ready.get('version') != 2 or
@@ -284,6 +299,9 @@ class Service:
             state['capture'] = 'failed' if state['start_unix'] else 'not_started'
             state['capture_error'] = str(exc)
             state['stop_unix'] = time.time()
+            if isinstance(self.source, Hardware) and state['start_unix'] is not None:
+                # Do not reuse a device after an unverified native acquisition failure.
+                self.stop.set()
         finally:
             try:
                 file.flush()
@@ -377,7 +395,8 @@ def receive_data(listener, output, part_file, manifest, sid, timeout, max_bytes,
                 not isinstance(hello.get('metadata'), dict) or hello['metadata'].get('request_id') != sid):
                 raise Error('invalid data handshake or request ID')
             stream_id = uuid.uuid4().hex
-            info.update(peer=str(peer), stream_session=stream_id, block_size=block)
+            info.update(peer=str(peer), stream_session=stream_id, block_size=block,
+                        capture_metadata=hello['metadata'])
             send_json(conn, {'type':'READY', 'version':2, 'session':stream_id, 'block_size':block})
             start = read_json(conn)
             if start.get('type') != 'START' or start.get('session') != stream_id:
@@ -553,9 +572,7 @@ def main():
             coordinator(a)
         else:
             Path(a.spool_dir).mkdir(parents=True, exist_ok=True)
-            if a.source == 'hh':
-                raise Error('real HH capture disabled pending loss-reporting and hardware validation')
-            source = Simulated()
+            source = Simulated() if a.source == 'simulate' else Hardware()
             service_obj = Service(a, source)
             try:
                 service_obj.run()
