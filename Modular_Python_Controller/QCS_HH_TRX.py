@@ -158,8 +158,24 @@ class Hardware:
             if not api.getDevice():
                 raise Error('HydraHarp unavailable or owned by another application')
             self.opened = True
-            if not api.initDevice(MeasMode.T2, refSrc=RefSource.Internal):
-                raise Error('HydraHarp T2 initialization failed')
+            if not api.deviceConfig.get('ID'):
+                raise Error('HydraHarp could not be opened: no device ID returned; check connection and whether another application is using it')
+            if not api.initDevice(MeasMode.T2, refSrc=RefSource.External_10MHZ):
+                raise Error('HydraHarp T2 initialization with external 10 MHz reference failed')
+            config_file = Path(__file__).with_name('HH.ini')
+            if config_file.is_file() and not api.loadIniConfig(str(config_file)):
+                raise Error('could not load HH.ini')
+            if not api.device.setSyncCFD(300, 10):
+                raise Error('could not set sync CFD')
+            for channel, level in ((0, 300), (1, 150)):
+                if channel >= int(api.deviceConfig.get('NumChans', 0)):
+                    continue
+                if not api.device.setInputCFD(channel, level, 10):
+                    raise Error('could not set input CFD on channel %d' % (channel + 1))
+                if not api.device.setInputChannelOffset(channel, 0):
+                    raise Error('could not set input offset on channel %d' % (channel + 1))
+            if not api.getDeviceConfig():
+                raise Error('could not read back HydraHarp configuration')
             config = dict(api.deviceConfig)
             self.metadata = {'device': config.get('Model', 'unavailable'),
                              'device_id': config.get('ID', 'unavailable'), 'mode': 'T2',
@@ -167,8 +183,8 @@ class Hardware:
                              'resolution_ps': config.get('Resolution'),
                              'device_config': config,
                              'device_loss_status': 'unknown; no automatic overrun detection; inspect snAPI console or log',
-                             'reference_source': 'Internal',
-                             'configuration_note': 'no separate channel setters called by service; initialization may apply SDK settings; values are SDK readback'}
+                             'reference_source': 'External_10MHZ',
+                             'configuration_note': 'controller startup CFD/offset settings applied; optional HH.ini loaded first; values are SDK readback'}
             json.dumps(self.metadata, allow_nan=False)
         except BaseException:
             self.close()
