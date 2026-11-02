@@ -1,0 +1,13 @@
+{
+  "pair_id": "nodeA-nodeB",
+  "max_measurement_age_s": 5.0,
+  "max_future_skew_s": 0.001,
+  "max_uncertainty_ps": 1000.0,
+  "drift_window": 8,
+  "phase_slew_tau_s": 20.0,
+  "max_correction_ppb": 100000.0,
+  "max_command_slew_ppb_per_update": 50000.0,
+  "holdover_decay_per_update": 0.0,
+  "reacquire_after_s": 10.0,
+  "note": "simulation starting values; not tuned to validated hardware"
+}

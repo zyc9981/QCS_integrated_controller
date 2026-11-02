@@ -1,0 +1,41 @@
+[
+  {
+    "scenario": "constant_offset_and_frequency",
+    "model_dependent": true,
+    "updates": 240,
+    "dropout_updates": 0,
+    "open_loop_final_offset_ps": 961300.0,
+    "closed_loop_final_offset_ps": -0.012259643984336141,
+    "open_loop_tail_rms_ps": 846140.3882729311,
+    "closed_loop_tail_rms_ps": 1.1067955512702632,
+    "closed_loop_tail_abs_p95_ps": 2.0842064614102522,
+    "closed_loop_tail_abs_max_ps": 2.705011135104771,
+    "first_5ps_held_10_updates_s": 153.15
+  },
+  {
+    "scenario": "changing_drift_noise_and_latency",
+    "model_dependent": true,
+    "updates": 300,
+    "dropout_updates": 0,
+    "open_loop_final_offset_ps": 547966.05452,
+    "closed_loop_final_offset_ps": 272.42560405832035,
+    "open_loop_tail_rms_ps": 411306.02179098676,
+    "closed_loop_tail_rms_ps": 2293.8609916465534,
+    "closed_loop_tail_abs_p95_ps": 4828.720884564716,
+    "closed_loop_tail_abs_max_ps": 5621.140402665266,
+    "first_5ps_held_10_updates_s": null
+  },
+  {
+    "scenario": "dropout_and_reacquisition",
+    "model_dependent": true,
+    "updates": 300,
+    "dropout_updates": 16,
+    "open_loop_final_offset_ps": -299200.0,
+    "closed_loop_final_offset_ps": 57.81695273885322,
+    "open_loop_tail_rms_ps": 359870.680476566,
+    "closed_loop_tail_rms_ps": 497.5137087480802,
+    "closed_loop_tail_abs_p95_ps": 1035.6117228571757,
+    "closed_loop_tail_abs_max_ps": 1206.3815571500988,
+    "first_5ps_held_10_updates_s": null
+  }
+]
