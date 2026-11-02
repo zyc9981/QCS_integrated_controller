@@ -1,0 +1,22 @@
+{
+  "id": "ed81e611a3b74d51a95bc152080aa52c",
+  "requested_duration_seconds": 60.0,
+  "local_path": "hh_spool\\ed81e611a3b74d51a95bc152080aa52c.bin",
+  "capture": "completed",
+  "transfer": "complete",
+  "linux_saved": "verified",
+  "source": {
+    "device": "simulated",
+    "mode": "T2",
+    "base_resolution": null,
+    "device_loss_status": "not applicable to simulated source"
+  },
+  "start_unix": 1793338701.8653355,
+  "stop_unix": 1793338761.8720632,
+  "ready": true,
+  "sent_bytes": 1973248,
+  "sha256": "0ca7e1300ba05dcaf98f8336d0736ff33077f53ce118f3eba8736676e141f6a5",
+  "bytes_captured": 1973248,
+  "records_captured": 493312,
+  "local_sha256": "0ca7e1300ba05dcaf98f8336d0736ff33077f53ce118f3eba8736676e141f6a5"
+}
