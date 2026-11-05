@@ -1,0 +1,26 @@
+{
+  "status": "NOT COMMISSIONED",
+  "approval_id": null,
+  "device": "Si5341 Rev D",
+  "target_serial": "210249AE83E1",
+  "output_path": "N1->OUT8->bank71",
+  "commissioned_at": null,
+  "nominal_numerator": 1452136671315,
+  "numerator": 1452136671315,
+  "denominator": 4250000000,
+  "r_divider": 2,
+  "physical_preconditions": {
+    "vadj_1v8_verified": false,
+    "out8_transient_approved": false,
+    "n1_activation_vendor_validated": false,
+    "diagnostic_clock_verified": false
+  },
+  "expected_registers": {
+    "0x0130": "0x06", "0x0131": "0x09", "0x0132": "0x33", "0x0133": "0x09",
+    "0x030D": "0x53", "0x030E": "0x28", "0x030F": "0x17",
+    "0x0310": "0x1A", "0x0311": "0x52", "0x0312": "0x01",
+    "0x0313": "0x80", "0x0314": "0xDA", "0x0315": "0x51", "0x0316": "0xFD",
+    "0x0A03": "0x03", "0x0A04": "0x01", "0x0A05": "0x03", "0x0B4A": "0x1C"
+  },
+  "note": "Template only. Current audit baseline has N1=0 and OUT8 disabled; do not edit these fields to bypass gates. Complete physical/vendor commissioning and capture fresh verified readbacks first."
+}

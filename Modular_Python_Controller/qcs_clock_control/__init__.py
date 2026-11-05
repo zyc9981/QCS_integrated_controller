@@ -1,4 +1,4 @@
-"""Offline QCS clock-discipline tools. This package never performs hardware I/O."""
+"""QCS clock-control tools. Hardware I/O is gated behind explicit live mode."""
 
 from .records import MeasurementRecord
 from .controller import ControllerConfig, ClockController

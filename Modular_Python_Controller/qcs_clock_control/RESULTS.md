@@ -1,24 +1,29 @@
-# Host clock-control prototype — results
+# QCS clock-control implementation results
 
-Implemented an isolated, runnable host package at `Modular_Python_Controller/qcs_clock_control/`. It supports deterministic simulation, JSONL/CSV read-only shadow input, model-dependent closed-loop replay, and a descriptive-only Si5341 N1 numerator calculator. It has no hardware-writing path and is not imported by `python_controller.py`; current acquisition behavior is unchanged.
+Implemented a Python 3.8 host package at `Modular_Python_Controller/qcs_clock_control/`. It now contains a shared JSONL parser for TCP/file/stdin, a TCP receiver and synthetic sender, feedback controller, exact Si5341 N1 numerator arithmetic, dry-run path, and a restricted Vivado/VIO transaction backend. Existing `python_controller.py` and acquisition behavior are untouched.
 
-## Measurement source and limits
+## Safety boundary and current hardware state
 
-The existing analyzer's time-dependent two-way estimate is `epsilon_ps=(fit_center-T_calib)-(fit_rt_center-T_calib_rt)/2` in ps. Its measurement time is based on the analyzed window midpoint; the adaptive window starts at 0.1 s and can reach 1 s. The GUI-only histogram display separately uses a default 500 ms integration. The estimator's `epsilon` sign has not been proven to match `node_time-reference_time` for this clock pair, and its default calibration terms are zero. It can still include path-delay terms.
+Dry-run is the default. Live operation requires `--mode live`, `--allow-live-writes`, and a commissioning manifest with completed physical/vendor gates. The checked-in manifest template has `status=NOT COMMISSIONED` and fails closed. The current clock-audit evidence says N1 is unconfigured and OUT8 is powered down, so the backend cannot run against the present baseline. It never performs initial N1 activation, changes OUT8 enable/power, denominator, N0, shared PLL, or global reset. When later authorized, it verifies the Si5341 grade/revision, controller-idle signature, payload gate closed, exact static N1/OUT8 state and current numerator; then it stages only six N1 NUM bytes, verifies them, pulses `0x0317[0]`, and verifies the self-clearing latch/readback. It holds the project control lease, rejects competing Vivado/I²C users, uses the existing management VIO and mux-mask `0x40` path (the FPGA engine returns the mux to zero), and restores the original Si5341 page. A partial transaction latches the host actuator fault and is never reported as successfully applied.
 
-The real saved `/home/zyc/QCS/20261023_Deployed_test/010_1s.npz` has 998 one-second `epsilon` samples, but no result-arrival timestamp or formal epsilon uncertainty; the available `tau_ref_uncertainty` is not epsilon uncertainty. Calibration/sign provenance is absent. The package's NPZ exporter therefore requires an explicit calibration assertion and makes any arrival-time assumption visible. I ran no actual-data shadow commands because the saved field is not yet demonstrated to satisfy the clock-offset contract. No passive live-estimate stream was found.
+No hardware transactions, clock activation/tuning, FPGA programming, instrument reconfiguration, or QSFP changes were performed for this implementation. Mock I²C transactions are software validation only.
+
+## Measurement source and sign
+
+The existing analyzer computes `epsilon_ps=(fit_center-T_calib)-(fit_rt_center-T_calib_rt)/2` in ps and uses the analysis-window midpoint as effective measurement time; the adaptive window starts at 0.1 s and can reach 1 s. The UI's separate live histogram uses a 500 ms integration. The existing estimator's epsilon sign has not been proven to equal `node-reference`, and propagation/path calibration is not established. It is rejected unless a producer sends the explicit mapping `offset = sign_multiplier × source_estimate − path_delay_correction` with calibration ID and `propagation_corrected` status.
+
+Wire age uses sender `age_ms_at_send` plus UTC transit age and declared UTC uncertainty. Receiver and sender monotonic values are never compared; the accepted effective time is mapped onto local monotonic time. Sender/receiver UTC synchronization and truthful combined uncertainty are required. Old, future, stale, duplicate, out-of-order, poor-quality, uncalibrated, and wrong-pair records are rejected.
 
 ## Validation
 
-- Python 3.8.10 interpreter: **12 unit tests passed**; package `compileall` passed.
-- Sign/latency/rejection, large-timestamp ps precision, saturation/slew, holdover/reacquisition, command delay/quantization, N1 rational math/register bytes/range, and corrected-offset replay are tested.
-- Synthetic shadow input and closed-loop replay both ran. The shadow example is explicitly illustrative, not measured data.
-- Model simulations and SVG figures are saved under `results/`; the constant-drift scenario reached a simulated 1.1 ps tail RMS and 2.1 ps absolute P95 after 153 s. Under drift changes/noise, the tail RMS was 2.29 ns; with dropout/reacquisition it was 498 ps. These are conditional model results and do not establish board performance. See `VALIDATION.md` for scenario parameters and detailed metrics.
+- `/usr/bin/python3.8`: **22 tests passed**.
+- Tests include both phase signs, drift direction, delay/age and stale rejection, duplicate sequence, command saturation and slew, dropouts/reacquisition, exact divider bytes, full TCP dry-run transaction, mock I²C writes/readback and update-bit behavior, commissioning-gate refusal, precondition mismatch, and injected partial transaction failure not reported as an applied correction.
+- Actual CLI TCP demonstration: 3 mock measurements received and logged; sender completed successfully. No hardware backend was instantiated.
+- Tcl bridge passed Tcl 8.6 completeness parsing; package passed Python 3.8 compileall.
+- Existing simulation suite re-run. In the ideal constant +4 ppb / 1.5 ps noise scenario it reached a model-dependent 1.11 ps tail RMS and 2.08 ps absolute P95 after 153 s. Changing-drift/noisy and dropout scenarios ended at 2.29 ns and 498 ps tail RMS; they do not meet 1–5 ps. Those outcomes depend on the simplified controller/plant and are not physical clock performance.
 
-## Next integration gates
+## Required before physical feedback
 
-1. Record `measurement_time`, result arrival time, estimate, fit uncertainty/quality, pair ID, channel mapping and calibration provenance from the actual analyzer.
-2. Validate that the chosen calibrated estimate is propagation-corrected and map its sign to `node-reference`.
-3. Tune/validate the controller with measured noise, latency and real actuator dynamics. N1/OUT8 remains uncommissioned, so every Si5341 register record is hypothetical.
-
-No hardware, clock, instruments, QSFP, FPGA, existing acquisition source, or deployed bitstream was changed.
+1. Confirm the actual g² estimator channel mapping, sign, path-delay correction, effective midpoint and uncertainty, and export the declared calibrated wire record. The archived NPZ does not contain formal epsilon uncertainty or arrival time.
+2. Complete N1→OUT8 commissioning: measure bank-71 VADJ, resolve OUT8 startup/shutdown transient behavior, validate the initial N1 activation sequence, and verify the diagnostic clock input. The existing audit reports these as outstanding; no live update can proceed until an approved manifest is created from real evidence/readbacks.
+3. Tune/validate feedback gains, command latency, stability and frequency-step response against the installed clock after commissioning. Simulation is not a substitute for this physical tuning.

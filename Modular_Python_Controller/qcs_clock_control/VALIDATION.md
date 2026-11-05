@@ -15,7 +15,7 @@ The input contract deliberately says `offset_kind=calibrated_clock_offset`; raw 
 - The controller performs an eight-sample least-squares drift estimate by default. It subtracts modeled applied phase from recorded offsets before estimating free-running drift; shadow mode passes zero applied phase because its hypothetical commands never affect hardware. Effective measurement age is propagated to current command time using observed net drift.
 - Default correction law uses 20 s phase-slew time, 100,000 ppb absolute limit, 50,000 ppb per-update slew limit, 5 s max measurement age, and 1,000 ps max declared uncertainty. These are prototype starting values, not tuned/stability-certified gains. Invalid, wrong-pair, out-of-order, stale, future, and over-uncertainty inputs are rejected. Dropout holdover retains the last command unless configured to decay; a long measurement gap clears slope history for phase-only reacquisition.
 - Simulated actuator accumulates rational phase at exact multiplicatively composed rates, applies delayed commands, and quantizes with the exact proposed Si5341 N1 numerator model. The scenario outputs keep hidden truth separate from noise and observations.
-- Si command calculator uses proposed `VCO=13,667,168,671.2 Hz`, `NUM=1452136671315`, `DEN=4250000000`, `R8=2`. N1 numerator changes inversely with output frequency. It emits only the descriptive six numerator bytes (`0x030D`–`0x0312`, mask `0x0F` on the high byte); there is no U7 writer and no activation/update/reset/output-enable sequence.
+- Si command calculator uses proposed `VCO=13,667,168,671.2 Hz`, nominal `NUM=1452136671315`, `DEN=4250000000`, `R8=2`. N1 numerator changes inversely with output frequency. The restricted live writer (not exercised against hardware) stages six numerator bytes (`0x030D`–`0x0312`, mask `0x0F` on the high byte), verifies staged bytes, pulses only `0x0317[0]`, verifies self-clear and readback, and refuses unless a completed commissioning manifest and fresh static-state checks pass. It has no initial activation, OUT8 enable, denominator, N0, PLL, reset or NVM operation.
 - Closed-loop replay adds the model's cumulative applied correction phase to subsequent recorded free-running offsets. This avoids replaying the same unchanged offsets after simulated actuation.
 
 ## Python 3.8 validation
@@ -27,7 +27,9 @@ PYTHONPATH=Modular_Python_Controller /usr/bin/python3.8 -m unittest discover \
   -s Modular_Python_Controller/qcs_clock_control/tests -v
 ```
 
-Result: **12 tests passed**. Coverage includes sign and units, ps differences on large absolute timestamps, latency extrapolation, invalid/stale/future/pair/low-quality/uncertainty rejection, saturation and slew, holdover/reacquisition, delay/quantization, exact divider arithmetic/bytes/range, and cumulative correction in closed-loop replay. `compileall` also passed under `/usr/bin/python3.8`.
+Result: **22 tests passed**. Coverage includes both offset signs, ps differences on large absolute timestamps, latency/age and optional acquisition-interval handling, invalid/stale/future/pair/low-quality/uncertainty rejection, duplicate sequence rejection, HMAC authentication, saturation and slew, holdover/reacquisition, delay/quantization, exact divider arithmetic/bytes/range, cumulative correction in closed-loop replay, TCP-to-controller dry-run, TCP-to-controller-to-mock-I²C application, mock I²C write bytes/readback/update, commissioning-gate refusal, precondition mismatch, and injected transaction failure not reported as applied. `compileall` also passed under `/usr/bin/python3.8`.
+
+The TCP CLI was exercised with a local `listen` node and synthetic `mock-server`; 3 JSONL measurements were received, validated, converted to commands and recorded as simulated-only. The Tcl bridge was syntax-completeness checked with the bundled Tcl 8.6 interpreter. No Vivado hardware session was opened and no hardware transaction or tuning occurred.
 
 ## Model runs (not hardware evidence)
 
@@ -52,6 +54,6 @@ The first idealized case meets a 1–5 ps residual scale in this model; the chan
 
 1. Add an export point in the existing estimator that records effective midpoint, result arrival time, `epsilon` and its propagated uncertainty, calibration terms, channel mapping, and clock-pair identity without altering acquisition defaults.
 2. Establish whether the chosen two-way `epsilon` is propagation compensated for the actual pair and map its sign to `node-reference`. Characterize estimator latency and valid/quality criteria from actual fit results.
-3. Validate loop stability with measured noise, delay/jitter, actuator resolution and clock dynamics. A future hardware-writing backend and U7 commissioning require separate approval after the documented electrical/clock commissioning blockers are cleared; neither exists here.
+3. Validate loop stability with measured noise, delay/jitter, actuator resolution and clock dynamics. The live backend exists but stays gated until the documented electrical/vendor/diagnostic commissioning blockers are cleared and a real commissioning manifest is produced.
 
 Nothing in this package changed `python_controller.py`, estimator code, instrument settings, FPGA state, U7, QSFP controls, or the deployed clock image.

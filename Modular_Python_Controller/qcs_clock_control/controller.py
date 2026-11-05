@@ -36,7 +36,11 @@ class ClockController:
     def __init__(self, config=None):
         self.config = config or ControllerConfig()
         self.samples = deque(maxlen=max(2, int(self.config.drift_window)))
+        # Commands are proposals until an actuator acknowledges them. Keeping
+        # these separate prevents a failed I2C transaction from influencing
+        # the next slew limit or being logged as applied.
         self.last_command_ppb = 0.0
+        self.last_applied_ppb = 0.0
         self.last_accepted_arrival_ns = None
         self.last_pair_id = None
         self.mode = "acquiring"
@@ -108,7 +112,7 @@ class ClockController:
         desired = ((1.0 - phase_term_ppb * 1e-9) / (1.0 + free_fraction) - 1.0) * 1e9
         desired = self._clamp(desired, -cfg.max_correction_ppb, cfg.max_correction_ppb)
         step = cfg.max_command_slew_ppb_per_update
-        command = self._clamp(desired, self.last_command_ppb - step, self.last_command_ppb + step)
+        command = self._clamp(desired, self.last_applied_ppb - step, self.last_applied_ppb + step)
         self.last_command_ppb = command
         self.last_accepted_arrival_ns = now_ns
         self.last_pair_id = record.pair_id
@@ -117,11 +121,21 @@ class ClockController:
         return self._result(status, record, now_ns, float(predicted_ps), drift_ppb,
                             command=command, age_ns=age_ns)
 
+    def confirm_applied(self, command_ppb):
+        """Commit an acknowledged actuator value as the new slew reference."""
+        self.last_applied_ppb = float(command_ppb)
+
     def holdover(self, now_ns):
         decay = min(1.0, max(0.0, self.config.holdover_decay_per_update))
-        self.last_command_ppb *= (1.0 - decay)
+        self.last_command_ppb = self.last_applied_ppb * (1.0 - decay)
+        if decay:
+            # A live caller must explicitly apply this holdover proposal before
+            # confirming it; pure shadow users only observe it.
+            pass
         self.mode = "holdover"
         return {"status": "holdover", "now_ns": int(now_ns), "command_ppb": self.last_command_ppb,
+                "requested_correction_ppb": self.last_command_ppb,
+                "last_applied_ppb": self.last_applied_ppb,
                 "estimated_offset_ps": None, "estimated_drift_ppb": None,
                 "measurement_age_ms": None, "samples": len(self.samples)}
 
@@ -129,7 +143,8 @@ class ClockController:
         if status.startswith("rejected"):
             return {"status": status, "measurement_time_ns": record.measurement_time_ns,
                     "arrival_time_ns": record.arrival_time_ns, "now_ns": int(now_ns),
-                    "pair_id": record.pair_id, "command_ppb": self.last_command_ppb,
+                    "pair_id": record.pair_id, "command_ppb": self.last_applied_ppb,
+                    "last_applied_ppb": self.last_applied_ppb,
                     "mode": self.mode, "samples": len(self.samples)}
         return {"status": status, "measurement_time_ns": record.measurement_time_ns,
                 "arrival_time_ns": record.arrival_time_ns, "now_ns": int(now_ns),
@@ -137,5 +152,6 @@ class ClockController:
                 "estimated_offset_ps": predicted_ps,
                 "estimated_drift_ppb": drift_ppb,
                 "requested_correction_ppb": command,
-                "command_ppb": command, "mode": self.mode,
+                "command_ppb": command, "last_applied_ppb": self.last_applied_ppb,
+                "mode": self.mode,
                 "samples": len(self.samples)}

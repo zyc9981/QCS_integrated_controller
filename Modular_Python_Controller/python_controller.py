@@ -141,7 +141,8 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self.time_tagger_trigger_levels = {
             1: 0.5,
             2: 0.5,
-            -3: -0.15,
+            # -3: -0.15,
+            -3: -0.1,
             4: 0.5,
         }
         self.time_tagger_channel_delays_ps = {

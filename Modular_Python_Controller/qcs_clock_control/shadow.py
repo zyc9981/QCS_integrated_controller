@@ -113,7 +113,8 @@ def replay_closed_loop(input_path, output_path, pair_id, model, command_delay_s=
             result = controller.update(corrected, free_record.arrival_time_ns,
                                        applied_phase_ps=correction_decimal)
             if result["status"] == "accepted":
-                actuator.request(result["command_ppb"], free_record.arrival_time_ns)
+                actual = actuator.request(result["command_ppb"], free_record.arrival_time_ns)
+                controller.confirm_applied(float(actual))
                 accepted += 1
             obj = _log_line(corrected, result, model)
             obj["simulated_correction_phase_ps"] = str(correction_at_sample)

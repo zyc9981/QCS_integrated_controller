@@ -1,4 +1,4 @@
-"""Descriptive Si5341 N1 numerator arithmetic; deliberately no writer backend."""
+"""Pure Si5341 N1 numerator arithmetic; performs no hardware I/O."""
 
 from fractions import Fraction
 from decimal import Decimal
@@ -33,6 +33,13 @@ class Si5341N1Model:
     @property
     def nominal_hz(self):
         return self.vco_hz * self.denominator / (self.numerator * self.r_divider)
+
+    def correction_for_numerator_ppb(self, numerator):
+        """Exact fractional output correction versus this model's nominal N1."""
+        numerator = int(numerator)
+        if not (1 <= numerator < (1 << 44)):
+            raise ValueError("N numerator does not fit 44 bits")
+        return (Fraction(self.numerator, numerator) - 1) * 1000000000
 
     def quantize_ppb(self, requested_ppb):
         """Return exact representable fractional correction as a Fraction."""

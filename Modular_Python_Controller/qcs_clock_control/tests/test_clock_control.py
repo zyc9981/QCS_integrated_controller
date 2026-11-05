@@ -23,6 +23,10 @@ class ControllerTests(unittest.TestCase):
         second = ctl.update(self.record(1000000000, 1000000000, 2000))
         self.assertGreater(second["estimated_drift_ppb"], 0.0)  # positive e slope
         self.assertLess(second["command_ppb"], -0.001)
+        behind = ClockController(ControllerConfig(pair_id="pair", phase_slew_tau_s=10,
+                                                 max_command_slew_ppb_per_update=1e9))
+        positive = behind.update(self.record(0, 0, -1000))
+        self.assertGreater(positive["command_ppb"], 0.0)  # negative offset => speed node up
 
     def test_measurement_latency_prediction_and_stale_rejection(self):
         ctl = ClockController(ControllerConfig(pair_id="pair", max_measurement_age_s=2,
@@ -54,6 +58,9 @@ class ControllerTests(unittest.TestCase):
                                                max_command_slew_ppb_per_update=0.5))
         r = ctl.update(self.record(0, 0, 1000000000))
         self.assertAlmostEqual(r["command_ppb"], -0.5)
+        # A proposed command must not become the slew reference until the
+        # actuator (or simulated actuator) acknowledges it.
+        ctl.confirm_applied(r["command_ppb"])
         h = ctl.holdover(100)
         self.assertAlmostEqual(h["command_ppb"], -0.5)
         saturated = ClockController(ControllerConfig(pair_id="pair", max_correction_ppb=2,

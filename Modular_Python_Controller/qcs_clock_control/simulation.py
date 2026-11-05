@@ -197,6 +197,7 @@ def run_scenario(name, duration_s=240, update_interval_s=1.0,
                                        applied_phase_ps=_fraction_decimal(applied_phase))
             applied = plant.request(result["command_ppb"], arrival_ns)
             result["applied_quantized_ppb"] = float(applied)
+            controller.confirm_applied(float(applied))
         # Evolve both clocks to this row's elapsed endpoint. Corrections act
         # only on the closed-loop plant; open_loop remains the baseline.
         sample_now_ns = arrival_ns

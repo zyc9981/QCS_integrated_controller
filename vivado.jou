@@ -3,22 +3,352 @@
 # SW Build 6299465 on Fri Nov 14 12:34:56 MST 2025
 # IP Build 6300035 on Fri Nov 14 10:48:45 MST 2025
 # SharedData Build 6298862 on Thu Nov 13 04:50:51 MST 2025
-# Start of session at: Mon Oct 19 22:21:14 2026
-# Process ID         : 4120322
+# Start of session at: Tue Nov  3 18:46:05 2026
+# Process ID         : 836702
 # Current directory  : /home/zyc/QCS/QCS_integrated_controller
-# Command line       : vivado -mode batch -source FPGA_HH_QSFP/tx_squelch_audit_20261019/read_capabilities.tcl -tclargs FPGA_HH_QSFP/tx_squelch_audit_20261019/results/live_eeprom.txt
+# Command line       : vivado -mode tcl
 # Log file           : /home/zyc/QCS/QCS_integrated_controller/vivado.log
 # Journal file       : /home/zyc/QCS/QCS_integrated_controller/vivado.jou
 # Running On         : qchip-1
 # Platform           : Ubuntu
 # Operating System   : Ubuntu 20.04.6 LTS
 # Processor Detail   : INTEL(R) XEON(R) SILVER 4509Y
-# CPU Frequency      : 1100.000 MHz
+# CPU Frequency      : 900.000 MHz
 # CPU Physical cores : 16
 # CPU Logical cores  : 32
 # Host memory        : 67207 MB
 # Swap memory        : 8589 MB
 # Total Virtual      : 75797 MB
-# Available Virtual  : 68473 MB
+# Available Virtual  : 65829 MB
 #-----------------------------------------------------------
-source FPGA_HH_QSFP/tx_squelch_audit_20261019/read_capabilities.tcl
+info commands si5341_read
+info commands si5341_read
+pwd
+exec find . -type f -name "control_i2c.tcl"
+exec find /home/zyc -type f -iname "*i2c*.tcl"
+exec grep -n "proc si5341_read" /home/zyc/QSFP_test/htg930_i2c_pages/control_i2c.tcl
+source /home/zyc/QSFP_test/htg930_i2c_pages/control_i2c.tcl
+get_hw_vios -quiet
+get_hw_devices
+open_hw_manager
+connect_hw_server -url TCP:localhost:3121
+get_hw_targets
+open_hw_target [lindex [get_hw_targets] 0]
+get_hw_devices
+get_property PROBES.FILE [get_hw_devices xcvu9p_0]
+exec find /home/zyc/QCS /home/zyc/QSFP_test /home/zyc/htg930_bringup -type f -name "*.ltx"
+get_property PROGRAM.FILE [get_hw_devices xcvu9p_0]
+exec grep -rl --include="*.ltx" "i2c_command" /home/zyc/QCS /home/zyc/QSFP_test /home/zyc/htg930_bringup
+exec sh -c {grep -rl --include='*.ltx' 'i2c_command' /home/zyc/QCS /home/zyc/QSFP_test /home/zyc/htg930_bringup; echo "grep_exit=$?"}
+exec sh -c {grep -rl --include='*.ltx' 'i2c_command' /home/zyc/QCS /home/zyc/QSFP_test /home/zyc/htg930_bringup 2>/dev/null | head -n 10}
+exec ls -lh /home/zyc/QCS/QCS_integrated_controller/FPGA_working_setup_20261009/bitstreams/
+set_property PROBES.FILE /home/zyc/QCS/QCS_integrated_controller/FPGA_working_setup_20261009/bitstreams/htg930_clock_probe.ltx [get_hw_devices xcvu9p_0]
+set_property PROBES.FILE /home/zyc/QCS/QCS_integrated_controller/FPGA_working_setup_20261009/bitstreams/htg930_clock_probe.ltx [get_hw_devices xcvu9p_0]
+refresh_hw_device [get_hw_devices xcvu9p_0]
+get_hw_vios
+report_property [lindex [get_hw_vios] 0]
+exec sh -c {grep -ril --include='*.ltx' '2EE76A08E148595EA5EA831592CBB3A0' /home/zyc/QCS /home/zyc/QSFP_test /home/zyc/htg930_bringup 2>/dev/null || true}
+foreach v [get_hw_vios] {puts "$v [get_property CORE_UUID $v]"}
+set f /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning/baseline_restore/hh_qsfp_top.ltx; set fh [open $f]; set data [read $fh]; close $fh; foreach v [get_hw_vios] {puts "$v matched=[expr {[string first [get_property CORE_UUID $v] $data] >= 0}]"}
+set_property PROBES.FILE /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning/baseline_restore/hh_qsfp_top.ltx [get_hw_devices xcvu9p_0]
+set_property PROBES.FILE /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning/baseline_restore/hh_qsfp_top.ltx [get_hw_devices xcvu9p_0]
+refresh_hw_device [get_hw_devices xcvu9p_0]
+get_hw_probes -quiet *i2c* -of_objects [get_hw_vios]
+foreach v [get_hw_vios] {puts "$v ([get_property CELL_NAME $v]): [get_hw_probes -of_objects $v]"}
+exec sh -c {grep -Rsn --include='*.v' --include='*.sv' 'mgmt_command' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP 2>/dev/null | head -n 20}
+exec sed -n '50,95p' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/buffered_guard_20261016/rtl/hh_qsfp_top.v
+exec sed -n 50,95p /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/buffered_guard_20261016/rtl/hh_qsfp_top.v
+exec sh -c {grep -RsnE --include='*.xdc' 'mgmt_scl|mgmt_sda' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP 2>/dev/null | head -n 20}
+exec sh -c {grep -RsnEi --include='*.xdc' 'i2c|scl|sda' /home/zyc/QSFP_test/QSFP_test /home/zyc/QSFP_test/HTG930_Hardware_I2C 2>/dev/null | head -n 30}
+exec sh -c {grep -Rsn --include='*.v' --include='*.sv' 'module burst_i2c' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP 2>/dev/null | head -n 10}
+exec sed -n 1,125p /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/buffered_guard_20261016/rtl/burst_i2c.v
+exec sed -n 125,230p /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/buffered_guard_20261016/rtl/burst_i2c.v
+report_property [get_hw_probes mgmt_command -of_objects [get_hw_vios hw_vio_3]]
+get_property OUTPUT_VALUE [get_hw_probes module_select_n -of_objects [get_hw_vios hw_vio_3]]
+refresh_hw_vio [get_hw_vios hw_vio_3]
+get_property INPUT_VALUE [get_hw_probes mgmt_status -of_objects [get_hw_vios hw_vio_3]]
+set_property OUTPUT_VALUE 00C1407702 [get_hw_probes mgmt_command -of_objects [get_hw_vios hw_vio_3]]
+commit_hw_vio [get_hw_vios hw_vio_3]
+refresh_hw_vio [get_hw_vios hw_vio_3]
+get_property INPUT_VALUE [get_hw_probes mgmt_status -of_objects [get_hw_vios hw_vio_3]]
+set_property OUTPUT_VALUE 0043407730 [get_hw_probes mgmt_command -of_objects [get_hw_vios hw_vio_3]]
+commit_hw_vio [get_hw_vios hw_vio_3]
+refresh_hw_vio [get_hw_vios hw_vio_3]
+set v [get_hw_vios hw_vio_3]
+refresh_hw_vio $v
+set s [get_property INPUT_VALUE [get_hw_probes mgmt_status -of_objects $v]]
+scan $s %x n
+puts [format "Register 0x0130: data=0x%02X, count=%d, error=%d, success=%d, busy=%d" [expr {($n >> 8) & 255}] [expr {$n >> 16}] [expr {($n >> 4) & 15}] [expr {($n >> 2) & 1}] [expr {$n & 1}]]
+set v [get_hw_vios hw_vio_3]
+set cmd_probe [get_hw_probes mgmt_command -of_objects $v]
+set status_probe [get_hw_probes mgmt_status -of_objects $v]
+set expected_count 388
+foreach {reg cmd} {
+    0131 00C3407731
+    0132 0043407732
+    0133 00C3407733
+} {
+    set_property OUTPUT_VALUE $cmd $cmd_probe
+    commit_hw_vio $v
+    after 100
+    refresh_hw_vio $v
+
+    scan [get_property INPUT_VALUE $status_probe] %x n
+
+    set count [expr {$n >> 16}]
+    set data [expr {($n >> 8) & 255}]
+    set err [expr {($n >> 4) & 15}]
+    set ok [expr {($n & 7) == 6}]
+
+    puts [format "Register 0x%s = 0x%02X | count=%d error=%d success=%d" $reg $data $count $err $ok]
+
+    incr expected_count
+    if {!$ok || $err != 0 || $count != $expected_count} {
+        error "Unexpected I2C status; stopping"
+    }
+}
+exec sh -c {grep -RsnEi --include='*.xdc' 'G20|G19|CLK0_M2C|DIFF_TERM|IN_TERM|LVDS' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101 /home/zyc/QSFP_test/QSFP_test/local_sources 2>/dev/null | head -n 60}
+exec sh -c {grep -RsnE --include='*.v' --include='*.sv' 'timing_clk_p|timing_clk_n|IBUFDS' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning 2>/dev/null | head -n 35}
+exec sh -c {grep -RsnE --include='*.v' --include='*.sv' 'timing_clk_p|timing_clk_n|IBUFDS' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning 2>/dev/null | head -n 35}
+exec sed -n 1,110p /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning/rtl/timing_clock_diagnostic.v
+exec sed -n 1,180p /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning/rtl/timing_frequency_monitor.v
+exec sed -n 1,180p /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning/rtl/timing_frequency_monitor.v
+exec sh -c {grep -Rnl --include='timing_frequency_monitor.v' 'assign status' /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP 2>/dev/null || true}
+exec tail -n 40 /home/zyc/QCS/QCS_integrated_controller/FPGA_HH_QSFP/clock_circuit_audit_20261101/commissioning/rtl/timing_frequency_monitor.v
+set v [get_hw_vios hw_vio_3]
+set cmd [get_hw_probes mgmt_command -of_objects $v]
+set status [get_hw_probes mgmt_status -of_objects $v]
+# Record previous completion count
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x old
+set old_count [expr {$old >> 16}]
+# Read Si5341 register 0x000C, page 0
+set_property OUTPUT_VALUE 004140770C $cmd
+commit_hw_vio $v
+after 200
+refresh_hw_vio $v
+# Decode result
+scan [get_property INPUT_VALUE $status] %x n
+set count [expr {$n >> 16}]
+set data [expr {($n >> 8) & 255}]
+set err [expr {($n >> 4) & 15}]
+set success [expr {($n >> 2) & 1}]
+set busy [expr {$n & 1}]
+puts [format "Register 0x000C = 0x%02X" $data]
+puts "Count: $old_count -> $count"
+puts "Error=$err Success=$success Busy=$busy"
+if {$count == $old_count + 1 && $err == 0 && $success && !$busy} {
+    puts "SYSINCAL = [expr {$data & 1}]"
+    puts "LOSXAXB  = [expr {($data >> 1) & 1}]"
+    puts "LOSREF   = [expr {($data >> 2) & 1}]"
+    puts "LOL      = [expr {($data >> 3) & 1}]"
+} else {
+    puts "Read not confirmed; do not interpret status bits."
+}
+set v [get_hw_vios hw_vio_3]
+set cmd [get_hw_probes mgmt_command -of_objects $v]
+set status [get_hw_probes mgmt_status -of_objects $v]
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x old
+# Read U7 register 0x0102 (page 1)
+set_property OUTPUT_VALUE 00C3407702 $cmd
+commit_hw_vio $v
+after 200
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x n
+set count [expr {$n >> 16}]
+set data [expr {($n >> 8) & 255}]
+set err [expr {($n >> 4) & 15}]
+set ok [expr {($n & 7) == 6 && $err == 0 && $count == ($old >> 16) + 1}]
+puts [format "Register 0x0102 = 0x%02X | count=%d error=%d success=%d" $data $count $err $ok]
+if {$ok} {
+    puts "OUTALL_DISABLE_LOW = [expr {$data & 1}]"
+} else {
+    puts "READ FAILED - do not interpret register value"
+}
+set v [get_hw_vios hw_vio_3]
+set cmd [get_hw_probes mgmt_command -of_objects $v]
+set status [get_hw_probes mgmt_status -of_objects $v]
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x old
+set expected [expr {$old >> 16}]
+# Last command had request bit 31 = 1, so start with 0
+set toggle 0
+foreach offset {0x62 0x63 0x64} {
+    set value [expr {
+        ($toggle << 31) |
+        (1 << 30) |
+        (2 << 25) |
+        (1 << 24) |
+        (0x40 << 16) |
+        (0x77 << 8) |
+        $offset
+    }]
+
+    set_property OUTPUT_VALUE [format %010X $value] $cmd
+    commit_hw_vio $v
+    after 200
+    refresh_hw_vio $v
+
+    scan [get_property INPUT_VALUE $status] %x n
+    incr expected
+
+    if {($n >> 16) != $expected || (($n >> 4) & 15) != 0 || ($n & 7) != 6} {
+        error "I2C read failed at offset $offset"
+    }
+
+    puts [format "0x%04X = 0x%02X" [expr {0x0200 + $offset}] [expr {($n >> 8) & 255}]]
+
+    set toggle [expr {1 - $toggle}]
+}
+set v [get_hw_vios hw_vio_3]
+set cmd [get_hw_probes mgmt_command -of_objects $v]
+set status [get_hw_probes mgmt_status -of_objects $v]
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x old
+set expected [expr {$old >> 16}]
+# Previous request toggle was 0
+set toggle 1
+foreach {page offset} {
+    10 0x03
+    10 0x05
+    11 0x4A
+} {
+    set value [expr {
+        ($toggle << 31) |
+        (1 << 30) |
+        ($page << 25) |
+        (1 << 24) |
+        (0x40 << 16) |
+        (0x77 << 8) |
+        $offset
+    }]
+
+    set_property OUTPUT_VALUE [format %010X $value] $cmd
+    commit_hw_vio $v
+    after 200
+    refresh_hw_vio $v
+
+    scan [get_property INPUT_VALUE $status] %x n
+    incr expected
+
+    if {($n >> 16) != $expected || (($n >> 4) & 15) != 0 || ($n & 7) != 6} {
+        error "I2C read failed"
+    }
+
+    puts [format "0x%02X%02X = 0x%02X" $page $offset [expr {($n >> 8) & 255}]]
+
+    set toggle [expr {1 - $toggle}]
+}
+set v [get_hw_vios hw_vio_3]
+set cmd [get_hw_probes mgmt_command -of_objects $v]
+set status [get_hw_probes mgmt_status -of_objects $v]
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x old
+set expected [expr {$old >> 16}]
+scan [get_property OUTPUT_VALUE $cmd] %llx previous
+set toggle [expr {1 - (($previous >> 31) & 1)}]
+foreach offset {2 3 4 5 6 7 8 9 10 11} {
+    set value [expr {
+        ($toggle << 31) |
+        (1 << 30) |
+        (3 << 25) |
+        (1 << 24) |
+        (0x40 << 16) |
+        (0x77 << 8) |
+        $offset
+    }]
+
+    set_property OUTPUT_VALUE [format %010X $value] $cmd
+    commit_hw_vio $v
+    after 200
+    refresh_hw_vio $v
+
+    scan [get_property INPUT_VALUE $status] %x n
+    incr expected
+
+    if {($n >> 16) != $expected || (($n >> 4) & 15) != 0 || ($n & 7) != 6} {
+        error "I2C read failed at offset $offset"
+    }
+
+    puts [format "0x%04X = 0x%02X" [expr {0x0300 + $offset}] [expr {($n >> 8) & 255}]]
+    set toggle [expr {1 - $toggle}]
+}
+set v [get_hw_vios hw_vio_3]
+set cmd [get_hw_probes mgmt_command -of_objects $v]
+set status [get_hw_probes mgmt_status -of_objects $v]
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x old
+set expected [expr {$old >> 16}]
+scan [get_property OUTPUT_VALUE $cmd] %llx previous
+set toggle [expr {1 - (($previous >> 31) & 1)}]
+foreach reg {
+    0x0021
+    0x0235 0x0236 0x0237 0x0238 0x0239
+    0x023A 0x023B 0x023C 0x023D 0x023E
+} {
+    set page [expr {$reg >> 8}]
+    set offset [expr {$reg & 255}]
+
+    set word [expr {
+        ($toggle << 31) |
+        (1 << 30) |
+        ($page << 25) |
+        (1 << 24) |
+        (0x40 << 16) |
+        (0x77 << 8) |
+        $offset
+    }]
+
+    set_property OUTPUT_VALUE [format %010X $word] $cmd
+    commit_hw_vio $v
+    after 200
+    refresh_hw_vio $v
+
+    scan [get_property INPUT_VALUE $status] %x n
+    incr expected
+
+    if {($n >> 16) != $expected || (($n >> 4) & 15) != 0 || ($n & 7) != 6} {
+        error [format "I2C read failed at 0x%04X" $reg]
+    }
+
+    puts [format "0x%04X = 0x%02X" $reg [expr {($n >> 8) & 255}]]
+    set toggle [expr {1 - $toggle}]
+}
+set v [get_hw_vios hw_vio_3]
+set cmd [get_hw_probes mgmt_command -of_objects $v]
+set status [get_hw_probes mgmt_status -of_objects $v]
+refresh_hw_vio $v
+scan [get_property INPUT_VALUE $status] %x old
+set expected [expr {$old >> 16}]
+scan [get_property OUTPUT_VALUE $cmd] %llx previous
+set toggle [expr {1 - (($previous >> 31) & 1)}]
+foreach reg {0x0206 0x090E} {
+    set page [expr {$reg >> 8}]
+    set offset [expr {$reg & 255}]
+
+    set word [expr {
+        ($toggle << 31) |
+        (1 << 30) |
+        ($page << 25) |
+        (1 << 24) |
+        (0x40 << 16) |
+        (0x77 << 8) |
+        $offset
+    }]
+
+    set_property OUTPUT_VALUE [format %010X $word] $cmd
+    commit_hw_vio $v
+    after 200
+    refresh_hw_vio $v
+
+    scan [get_property INPUT_VALUE $status] %x n
+    incr expected
+
+    if {($n >> 16) != $expected || (($n >> 4) & 15) != 0 || ($n & 7) != 6} {
+        error [format "I2C read failed at 0x%04X" $reg]
+    }
+
+    puts [format "0x%04X = 0x%02X" $reg [expr {($n >> 8) & 255}]]
+    set toggle [expr {1 - $toggle}]
+}
