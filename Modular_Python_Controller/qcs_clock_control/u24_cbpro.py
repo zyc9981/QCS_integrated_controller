@@ -17,6 +17,7 @@ from .pcie_i2c import (EXPECTED_ID, REG_ID, PcieI2cClient, FileMmio,
 U24_ADDRESS = 0x75
 U24_MUX_MASK = 0x02
 REVIEWED_PROFILE_SHA256 = "7a38d10731157c8adc234a19635e321e8c7215216cbb027af941d3cd6ee85003"
+REVIEWED_EXTERNAL_PROFILE_SHA256 = "1091d07c31ff8555dcbcd51e7a40dafbc964ecd1270a92648c969dd531815e81"
 EXPECTED_DEVICE_ID = {0x00FE: 0x0F, 0x0002: 0x41, 0x0003: 0x53,
                       0x0004: 0x00, 0x0005: 0x03}
 OUT_CONTROL_ADDRS = (0x0108, 0x010D, 0x0112, 0x0117, 0x011C,
@@ -99,10 +100,19 @@ def validate_u24_profile(profile):
     values = {}
     for event in profile["writes"]:
         values[event["address"]] = event["value"]
-    required = {0x000B: 0x74, 0x0021: 0x0F, 0x0102: 0x01,
+    input_select = values.get(0x0021)
+    input_enable = values.get(0x0949)
+    input_pfd = values.get(0x094A)
+    if (input_select, input_enable, input_pfd) == (0x0F, 0x00, 0x00):
+        profile_kind = "crystal"
+    elif (input_select, input_enable, input_pfd) == (0x0B, 0x02, 0x20):
+        profile_kind = "external_in1"
+    else:
+        raise ProfileError("profile must select either reviewed crystal input or external IN1")
+    required = {0x000B: 0x74, 0x0021: input_select, 0x0102: 0x01,
                 0x013A: 0x02, 0x013B: 0x09, 0x013C: 0x33,
-                0x013D: 0x09, 0x0943: 0x00, 0x0949: 0x00,
-                0x094A: 0x00, 0x0A03: 0x02, 0x0A04: 0x00,
+                0x013D: 0x09, 0x0943: 0x00, 0x0949: input_enable,
+                0x094A: input_pfd, 0x0A03: 0x02, 0x0A04: 0x00,
                 0x0A05: 0x02}
     for address, expected in required.items():
         if values.get(address) != expected:
@@ -113,9 +123,18 @@ def validate_u24_profile(profile):
                                (OUT_CONTROL_ADDRS.index(address), address))
     if 0x0310 not in values or values.get(0x0316, 0) == 0:
         raise ProfileError("profile does not contain the expected nonzero N1 divider")
-    if not any(e["kind"] == "delay" and abs(e["seconds"] - 0.3) < 1e-9
-               for e in profile["events"]):
-        raise ProfileError("profile is missing CBPro's 300 ms calibration delay")
+    events = profile["events"]
+    preamble_end = min((i for i, e in enumerate(events)
+                        if e["kind"] == "write" and e["address"] == 0x0B25),
+                       default=-1)
+    first_configuration = next((i for i, e in enumerate(events)
+                                if e["kind"] == "write" and e["address"] == 0x0006),
+                               len(events))
+    delay_after_preamble = sum(e["seconds"] for e in events[preamble_end + 1:first_configuration]
+                               if e["kind"] == "delay")
+    if preamble_end < 0 or delay_after_preamble < 0.3:
+        raise ProfileError("profile must wait at least 300 ms after its preamble before configuration writes")
+    profile["profile_kind"] = profile_kind
     return values
 
 
@@ -146,9 +165,9 @@ class U24ProfileTransport(object):
         failure. It never writes NVM.
         """
         validate_u24_profile(profile)
-        if profile.get("sha256") != REVIEWED_PROFILE_SHA256:
-            raise ProfileError("live loading is restricted to the reviewed HTGU24 file SHA-256 %s" %
-                               REVIEWED_PROFILE_SHA256)
+        if profile.get("sha256") not in (REVIEWED_PROFILE_SHA256,
+                                          REVIEWED_EXTERNAL_PROFILE_SHA256):
+            raise ProfileError("live loading is restricted to the reviewed crystal or external-IN1 HTGU24 profile hashes")
         unique_addresses = sorted(set(e["address"] for e in profile["writes"]))
         result = {"target": "U24 Si5341 Rev D", "i2c_address": hex(U24_ADDRESS),
                   "mux_mask": hex(U24_MUX_MASK), "profile": profile["path"],

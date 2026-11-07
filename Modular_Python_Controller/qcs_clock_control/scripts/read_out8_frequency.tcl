@@ -13,7 +13,11 @@ set d [lindex $devices 0]
 current_hw_device $d
 set_property PROBES.FILE $ltx $d
 refresh_hw_device -update_hw_probes true $d
+# The QSFP timing diagnostic names this probe timing_diag/timing_status;
+# the isolated FPGA_node PCIe image exposes the same 256-bit monitor as
+# timing_status. Resolve both without committing or changing any VIO output.
 set p [get_hw_probes -quiet timing_diag/timing_status]
+if {[llength $p]!=1} {set p [get_hw_probes -quiet timing_status]}
 if {[llength $p]!=1} {error "timing_status probe missing"}
 set v [get_hw_vios [get_property HW_VIO $p]]
 set_property INPUT_VALUE_RADIX HEX $p

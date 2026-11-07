@@ -137,18 +137,21 @@ class App(TxCommandsMixin, RxCommandsMixin):
         # steps.  Device configuration now belongs to Time Tagger X.
         self.qutag = None
         self.time_tagger = None
-        self.time_tagger_setting_channels = [1, 2, -3, 4]
+        self.time_tagger_setting_channels = [1, 2, 3, 4]
         self.time_tagger_trigger_levels = {
             1: 0.5,
             2: 0.5,
-            # -3: -0.15,
-            -3: -0.1,
-            4: 0.5,
+            3: 0.3,
+            # -3: -0.1,
+            4: 0.3,
+            # -4: -0.05
         }
         self.time_tagger_channel_delays_ps = {
             1: 0,
             2: 0,
-            -3: 0,
+            # -3: 0,
+            3: 0,
+            # -4: 0,
             4: 0,
         }
         # The Counter bin width replaces QuTAG's exposure time.  Counts from

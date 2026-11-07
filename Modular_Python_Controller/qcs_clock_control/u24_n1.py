@@ -1,4 +1,4 @@
-"""Runtime controls for the commissioned U24 N1 -> OUT9 path only."""
+"""Runtime controls for U24 external-IN1 N1 -> OUT9 profile only."""
 from fractions import Fraction
 
 from .actuator import ActuatorError, NUM_ADDRS, build_n1_register_plan
@@ -7,14 +7,20 @@ from .u24_cbpro import (EXPECTED_DEVICE_ID, OUT_CONTROL_ADDRS, U24_ADDRESS,
                         U24_MUX_MASK, _u24_command)
 
 
-NOMINAL_NUMERATOR = 0x004550000000
-N1_DENOMINATOR = 0xA0000000
-N1_STEP_WORD = 14885  # CBPro: 50.0008556 ppb per direct N1 word step.
+# 10 MHz setpoint derived by doubling the calibrated 20 MHz N1 numerator.
+# Hardware must be updated with apply_u24_10mhz_plan.py before live tuning.
+NOMINAL_NUMERATOR = 2841979898700
+NOMINAL_FREQUENCY_HZ = 10000000
+N1_DENOMINATOR = 0xFFFFFFF0
+N1_FSTEPW = 5551  # CBPro FINC/FDEC word; not a limit on direct NUM writes.
 MAX_ABSOLUTE_PPM = Fraction(200, 1)
 EXPECTED_STATIC = {
-    0x000B: 0x74, 0x0021: 0x0F,
-    0x013A: 0x02, 0x013B: 0x09, 0x013C: 0x33, 0x013D: 0x09,
-    0x0313: 0x00, 0x0314: 0x00, 0x0315: 0x00, 0x0316: 0xA0,
+    # HTG930_U24_ext-HTGU24 profile: IN1 selected/enabled as PLL reference.
+    0x000B: 0x74, 0x0021: 0x0B,
+    0x0943: 0x00, 0x0949: 0x02, 0x094A: 0x20,
+    0x013A: 0x06, 0x013B: 0x09, 0x013C: 0x33, 0x013D: 0x09,
+    0x0268: 0x06,
+    0x0313: 0xF0, 0x0314: 0xFF, 0x0315: 0xFF, 0x0316: 0xFF,
     0x0A03: 0x02, 0x0A04: 0x00, 0x0A05: 0x02, 0x0B4A: 0x1D,
 }
 for _address in OUT_CONTROL_ADDRS[:-1]:
@@ -29,19 +35,19 @@ def _round_nearest(value):
 
 
 def calculate_u24_n1_ppm(requested_ppm):
-    """Return a step-word-aligned N1 numerator for ppm relative to CBPro nominal.
+    """Return an integer N1 numerator for ppm relative to commissioned nominal.
 
     Positive ppm means a faster OUT9 clock, therefore a smaller N1 numerator.
-    The output is quantized to the 14885-count CBPro DCO word.
+    The active profile uses DCO "Register Direct Write" mode. Quantize only
+    to the integer N1_NUM register LSB; N1_FSTEPW applies to FINC/FDEC and
+    does not limit direct numerator writes (Si5341 Rev D Family RM, §6.1.2).
     """
     ppm = Fraction(str(requested_ppm))
     if abs(ppm) > MAX_ABSOLUTE_PPM:
         raise ValueError("U24 correction is limited to +/-200 ppm")
     desired = ppm / 1000000
     raw_target = Fraction(NOMINAL_NUMERATOR, 1) / (1 + desired)
-    steps = _round_nearest((Fraction(NOMINAL_NUMERATOR, 1) - raw_target) /
-                           N1_STEP_WORD)
-    target = NOMINAL_NUMERATOR - steps * N1_STEP_WORD
+    target = _round_nearest(raw_target)
     if not 0 < target < (1 << 44):
         raise ValueError("requested N1 numerator is outside the 44-bit range")
     actual_ppm = (Fraction(NOMINAL_NUMERATOR, target) - 1) * 1000000
@@ -50,12 +56,16 @@ def calculate_u24_n1_ppm(requested_ppm):
     return {
         "requested_ppm": str(ppm),
         "representable_ppm": float(actual_ppm),
-        "steps_from_nominal": steps,
-        "step_word": N1_STEP_WORD,
+        "numerator_delta": target - NOMINAL_NUMERATOR,
+        "quantization": "nearest integer N1_NUM LSB; direct register write",
+        "fstepw_finc_fdec_only": N1_FSTEPW,
+        "one_numerator_lsb_ppm_approx": 1000000.0 / NOMINAL_NUMERATOR,
+        "one_numerator_lsb_hz_approx": NOMINAL_FREQUENCY_HZ / NOMINAL_NUMERATOR,
+        "one_numerator_lsb_ps_per_second_approx": 1e12 / NOMINAL_NUMERATOR,
         "numerator": target,
         "numerator_hex": "0x%012X" % target,
-        "nominal_hz": 20000000,
-        "representable_hz_from_nominal": 20000000.0 *
+        "nominal_hz": NOMINAL_FREQUENCY_HZ,
+        "representable_hz_from_nominal": float(NOMINAL_FREQUENCY_HZ) *
             (1.0 + float(actual_ppm) / 1000000.0),
         "register_bytes_lsb_first": [
             {"address": "0x%04X" % address,

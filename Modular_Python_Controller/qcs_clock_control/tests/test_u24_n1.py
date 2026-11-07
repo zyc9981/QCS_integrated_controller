@@ -4,7 +4,7 @@ from qcs_clock_control.actuator import ActuatorError, NUM_ADDRS
 from qcs_clock_control.pcie_i2c import EXPECTED_ID, REG_ID
 from qcs_clock_control.u24_cbpro import EXPECTED_DEVICE_ID, U24_ADDRESS
 from qcs_clock_control.u24_n1 import (EXPECTED_STATIC, NOMINAL_NUMERATOR,
-                                      N1_DENOMINATOR, N1_STEP_WORD,
+                                      N1_DENOMINATOR,
                                       apply_u24_n1_numerator,
                                       calculate_u24_n1_ppm, read_u24_state)
 
@@ -64,10 +64,17 @@ class U24N1Tests(unittest.TestCase):
         negative = calculate_u24_n1_ppm("-1.0")
         self.assertLess(positive["numerator"], NOMINAL_NUMERATOR)
         self.assertGreater(negative["numerator"], NOMINAL_NUMERATOR)
-        self.assertEqual((NOMINAL_NUMERATOR - positive["numerator"]) % N1_STEP_WORD, 0)
-        self.assertEqual((negative["numerator"] - NOMINAL_NUMERATOR) % N1_STEP_WORD, 0)
-        self.assertAlmostEqual(positive["representable_ppm"], 1.000018, places=4)
-        self.assertAlmostEqual(negative["representable_ppm"], -1.000018, places=4)
+        self.assertAlmostEqual(positive["representable_ppm"], 1.0, delta=5e-6)
+        self.assertAlmostEqual(negative["representable_ppm"], -1.0, delta=5e-6)
+        self.assertEqual(NOMINAL_NUMERATOR, 2841979898700)
+        self.assertEqual(N1_DENOMINATOR, 4294967280)
+        self.assertEqual(positive["nominal_hz"], 10000000)
+        self.assertLess(NOMINAL_NUMERATOR, 1 << 44)
+        self.assertEqual(positive["numerator"] < NOMINAL_NUMERATOR, True)
+        tiny = calculate_u24_n1_ppm("0.01")
+        self.assertNotEqual(tiny["numerator"], NOMINAL_NUMERATOR)
+        self.assertAlmostEqual(tiny["representable_ppm"], 0.01, delta=2e-6)
+        self.assertEqual(tiny["quantization"], "nearest integer N1_NUM LSB; direct register write")
         with self.assertRaisesRegex(ValueError, "limited to"):
             calculate_u24_n1_ppm("200.1")
 

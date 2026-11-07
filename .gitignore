@@ -38,3 +38,6 @@ automatic_calib_logs/
 # Local FPGA project, Vivado outputs, and capture data
 /FPGA_HH_QSFP/
 /HH400-v3.x-Demos-master/
+
+# Standalone local FPGA-node migration package
+/FPGA_node/
