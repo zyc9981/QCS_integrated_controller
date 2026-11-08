@@ -699,6 +699,7 @@ class RxCommandsMixin:
             for histogram in previous_histograms.values():
                 try:
                     histogram.stop()
+                    getattr(self, "time_tagger_marker", lambda message: None)("Acquisition stopped: previous Histogram")
                 except Exception:
                     pass
 

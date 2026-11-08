@@ -17,6 +17,9 @@ from tkinter import (
     messagebox,
 )
 
+# Temporary scan selection; other HydraHarp acquisition paths are unchanged.
+ENABLE_HYDRAHARP_PIEZOSCAN = False
+
 
 def _ensure_qutag_piezoscan_state(app):
     if getattr(app, "_qutag_piezoscan_state_init", False):
@@ -184,7 +187,9 @@ def _measure_tagger_counters(app, timeout_s=1.0):
     data = app.read_time_tagger_counts(timeout_s=timeout_s, clear=True)
     if data is not None:
         time_tagger_values = [float(data[index]) for index in counter_indices]
-        return time_tagger_values + _measure_hydraharp_counts(app)
+        if ENABLE_HYDRAHARP_PIEZOSCAN:
+            return time_tagger_values + _measure_hydraharp_counts(app)
+        return time_tagger_values
 
     raise TimeoutError("Timed out waiting for a Time Tagger X Counter bin.")
 
@@ -531,7 +536,9 @@ def tx_scan_piezo_qutag(app):
     # Temporary display selection: Time Tagger X channels 3 and 4 remain usable elsewhere,
     # but are omitted from this scan for a clearer plot.
     app.qutag_piezoscan_counter_indices = [1, 2]
-    app.qutag_piezoscan_hydraharp_channel_indices = [1]
+    app.qutag_piezoscan_hydraharp_channel_indices = (
+        [1] if ENABLE_HYDRAHARP_PIEZOSCAN else []
+    )
     app.qutag_piezoscan_series = (
         [("Time Tagger X", counter_index) for counter_index in app.qutag_piezoscan_counter_indices]
         + [

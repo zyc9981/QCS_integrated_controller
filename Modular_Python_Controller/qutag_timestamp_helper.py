@@ -998,6 +998,7 @@ def _start_timestamp_recording(app):
         except Exception as exc:
             try:
                 app.time_tagger_file_writer.stop()
+                getattr(app, "time_tagger_marker", lambda message: None)("Timestamp acquisition stopped: Internet startup failed")
             except Exception as cleanup_exc:
                 app.tx_log_print(f"[TimeTag] Writer cleanup failed: {cleanup_exc}")
             finally:
@@ -1032,6 +1033,7 @@ def _start_timestamp_recording(app):
             cleanup_errors = []
             try:
                 app.time_tagger_file_writer.stop()
+                getattr(app, "time_tagger_marker", lambda message: None)("Timestamp acquisition stopped: QSFP startup failed")
             except Exception as cleanup_exc:
                 cleanup_errors.append(f"Time Tagger X: {cleanup_exc}")
             app.time_tagger_file_writer = None
@@ -1235,7 +1237,9 @@ def _stop_timestamp_writing(app):
     if time_tagger_writing and file_writer is not None:
         try:
             file_writer.stop()
+            getattr(app, "time_tagger_marker", lambda message: None)("Timestamp acquisition stopped: FileWriter")
         except Exception as exc:
+            getattr(app, "time_tagger_marker", lambda message: None)(f"Timestamp acquisition stop failed: {exc}")
             errors.append(f"Time Tagger X: {exc}")
     app.time_tagger_file_writer = None
 

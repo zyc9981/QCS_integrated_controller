@@ -3,6 +3,7 @@ import ast
 import collections
 from datetime import datetime
 import json
+import logging
 import os
 import queue
 import threading
@@ -11,6 +12,7 @@ import numpy as np
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENABLE_TTX_DIAGNOSTICS = False
 from optical_stream import OpticalLink, hydraharp_blocks, capture_hh_qsfp
 from qsfp_mode_ui import get_qsfp_modes
 
@@ -137,14 +139,15 @@ class App(TxCommandsMixin, RxCommandsMixin):
         # steps.  Device configuration now belongs to Time Tagger X.
         self.qutag = None
         self.time_tagger = None
-        self.time_tagger_setting_channels = [1, 2, 3, 4]
+        # self.time_tagger_setting_channels = [1, 2, 3, 4]
+        self.time_tagger_setting_channels = [1, 2, -3, -4]
         self.time_tagger_trigger_levels = {
             1: 0.5,
             2: 0.5,
-            3: 0.3,
-            # -3: -0.1,
-            4: 0.3,
-            # -4: -0.05
+            # 3: 0.3,
+            -3: -0.15,
+            # 4: 0.3,
+            -4: -0.15
         }
         self.time_tagger_channel_delays_ps = {
             1: 0,
@@ -242,10 +245,15 @@ class App(TxCommandsMixin, RxCommandsMixin):
             print("ERROR: Could not connect to laser:", exc)
 
         self.root = Tk()
+        if ENABLE_TTX_DIAGNOSTICS:
+            self.root.bind_all("<Control-Shift-D>", lambda event: self.open_time_tagger_diagnostics())
         self.root.title("Hybrid TX/RX Control")
         self.root.withdraw()
 
         self.build_tx_panel()
+        if ENABLE_TTX_DIAGNOSTICS:
+            Button(self.tx_win, text="Time Tagger diagnostics / event marker",
+                   command=self.open_time_tagger_diagnostics).pack()
         self.build_rx_panel()
         self.tx_log_print(f"[TX] Sending default voltages from {self.default_voltages_path.name}...")
         self.tx_init_voltages()
@@ -255,25 +263,108 @@ class App(TxCommandsMixin, RxCommandsMixin):
         self.tx_win.protocol("WM_DELETE_WINDOW", self._quit_all)
         self.rx_win.protocol("WM_DELETE_WINDOW", self._quit_all)
 
+    def _start_time_tagger_log(self):
+        """Create one diagnostic log per device initialization attempt."""
+        if not ENABLE_TTX_DIAGNOSTICS:
+            self.time_tagger_logger = logging.Logger(f"TTX.disabled.{id(self)}")
+            self.time_tagger_logger.addHandler(logging.NullHandler())
+            self.time_tagger_log_path = None
+            return
+        if getattr(self, "time_tagger_sdk_callback", None) is not None:
+            # setLogger is process-wide: never replace our callback mid-session.
+            self.time_tagger_marker("Reusing registered SDK logger")
+            return
+        self._close_time_tagger_log()
+        logger = logging.Logger(f"TTX.{id(self)}", level=logging.INFO)
+        self.time_tagger_logger = logger
+        self.time_tagger_log_path = None
+        try:
+            log_dir = PROJECT_ROOT / "TTX_log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = log_dir / f"TTX_{stamp}_{os.getpid()}.log"
+            handler = logging.FileHandler(path, mode="x", encoding="utf-8")
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)s [%(threadName)s] %(message)s"
+            ))
+            logger.addHandler(handler)
+            self.time_tagger_log_path = path
+            logger.info("Time Tagger X startup requested")
+            print(f"Time Tagger X log: {path}")
+        except OSError as exc:
+            raise RuntimeError(f"Cannot open Time Tagger diagnostic log: {exc}") from exc
+
+    def time_tagger_marker(self, message):
+        logger = getattr(self, "time_tagger_logger", None)
+        if logger is not None:
+            logger.info("APP MARKER: %s", message)
+
+    def open_time_tagger_diagnostics(self):
+        dialog = Toplevel(self.root)
+        dialog.title("Time Tagger X diagnostics")
+        Label(dialog, text=f"Log: {self.time_tagger_log_path}", wraplength=700).pack(padx=10, pady=10)
+        Label(dialog, text="Markers record observations; LED changes may produce no SDK message.").pack()
+        for marker in ("CLK IN connected (Si5341)", "CLK IN disconnected",
+                       "CH3 FPGA clock connected", "CH3 FPGA clock disconnected",
+                       "CH4 FPGA clock connected", "CH4 FPGA clock disconnected",
+                       "CH3 LED observed red", "CH4 LED observed red"):
+            Button(dialog, text=marker,
+                   command=lambda text=marker: self.time_tagger_marker(text)).pack(fill="x")
+        entry = Entry(dialog, width=80)
+        entry.pack(padx=10, pady=10)
+        Button(dialog, text="Insert custom marker",
+               command=lambda: self.time_tagger_marker(entry.get())).pack(pady=5)
+
+    def _close_time_tagger_log(self):
+        # Keep the callback and its file alive even for late SDK shutdown logs.
+        # logging.shutdown flushes/closes handlers when this process exits.
+        if getattr(self, "time_tagger_sdk_callback", None) is not None:
+            return
+        logger = getattr(self, "time_tagger_logger", None)
+        if logger is not None:
+            for handler in list(logger.handlers):
+                handler.close()
+                logger.removeHandler(handler)
+        self.time_tagger_logger = None
+
     def init_time_tagger(self):
+        self._start_time_tagger_log()
         if TimeTagger is None:
+            self.time_tagger_logger.error("Python package import failed; device unavailable")
             print("Time Tagger X unavailable: Python package import failed.")
             return False
 
         try:
+            if ENABLE_TTX_DIAGNOSTICS and getattr(self, "time_tagger_sdk_callback", None) is None:
+                logger = self.time_tagger_logger
+
+                def sdk_callback(level, message):
+                    # Do not map SDK levels to Python levels: even 0/unknown
+                    # levels must pass. FileHandler serializes and flushes each
+                    # complete record, including multiline messages, under a lock.
+                    logger.info("SDK level=%s message=%s", level, message)
+
+                self.time_tagger_marker(f"Registering SDK logger in hardware process pid={os.getpid()}")
+                TimeTagger.setLogger(sdk_callback)
+                self.time_tagger_sdk_callback = sdk_callback
+                self.time_tagger_marker("SDK logger registered; all callback levels captured")
+            self.time_tagger_marker("Device opening: createTimeTagger")
             self.time_tagger = TimeTagger.createTimeTagger()
             serial = self.time_tagger.getSerial()
             model = self.time_tagger.getModel()
         except Exception as exc:
             self.time_tagger = None
+            self.time_tagger_logger.exception("Could not initialize Time Tagger X")
             print("ERROR: Could not initialize Time Tagger X:", exc)
             return False
 
         print(f"Connected to Time Tagger X: model {model}, serial {serial}")
+        self.time_tagger_logger.info("Connected: model=%s serial=%s", model, serial)
         try:
             self.apply_time_tagger_settings()
             self.configure_time_tagger_counter()
         except Exception as exc:
+            self.time_tagger_logger.exception("Could not apply default settings")
             print("ERROR: Could not apply default Time Tagger X settings:", exc)
         return True
 
@@ -713,6 +804,12 @@ class App(TxCommandsMixin, RxCommandsMixin):
         # Wait until the settings have reached the hardware before a future
         # measurement object begins consuming time tags.
         self.time_tagger.sync()
+        logger = getattr(self, "time_tagger_logger", None)
+        if logger is not None:
+            logger.info("Settings applied: channels=%s trigger_levels=%s delays_ps=%s",
+                        self.time_tagger_setting_channels,
+                        self.time_tagger_trigger_levels,
+                        self.time_tagger_channel_delays_ps)
 
     def configure_time_tagger_counter(self):
         """Create the shared fixed-bin counter used by the live count views."""
@@ -729,6 +826,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
             if previous_counter is not None:
                 try:
                     previous_counter.stop()
+                    self.time_tagger_marker("Acquisition stopped: previous Counter")
                 except Exception:
                     pass
 
@@ -739,6 +837,7 @@ class App(TxCommandsMixin, RxCommandsMixin):
                 binwidth=bin_width_ps,
                 n_values=20,
             )
+            self.time_tagger_marker("Acquisition started: live Counter")
 
     def read_time_tagger_counts(self, timeout_s=0.0, clear=False):
         """Return the newest completed Counter bin as {channel: counts}.
@@ -774,41 +873,53 @@ class App(TxCommandsMixin, RxCommandsMixin):
         if self.time_tagger is None or TimeTagger is None:
             raise RuntimeError("Time Tagger X is not initialized.")
 
-        return TimeTagger.Histogram(
+        measurement = TimeTagger.Histogram(
             tagger=self.time_tagger,
             click_channel=int(stop_channel),
             start_channel=int(start_channel),
             binwidth=int(bin_width_ps),
             n_bins=int(bin_count),
         )
+        self.time_tagger_marker(f"Acquisition started: Histogram start={start_channel} stop={stop_channel}")
+        return measurement
 
     def create_time_tagger_file_writer(self, filename, channels):
         """Start a Time Tagger X FileWriter for the selected input channels."""
         if self.time_tagger is None or TimeTagger is None:
             raise RuntimeError("Time Tagger X is not initialized.")
 
-        return TimeTagger.FileWriter(
+        self.time_tagger_marker(f"Timestamp acquisition starting: filename={filename} channels={channels}")
+        measurement = TimeTagger.FileWriter(
             tagger=self.time_tagger,
             filename=str(filename),
             channels=[int(channel) for channel in channels],
         )
+        self.time_tagger_marker("Timestamp acquisition started: FileWriter")
+        return measurement
 
     def shutdown_time_tagger(self):
+        logger = getattr(self, "time_tagger_logger", None)
+        if logger is not None:
+            logger.info("Time Tagger X shutdown requested")
         file_writer = getattr(self, "time_tagger_file_writer", None)
         self.time_tagger_file_writer = None
         if file_writer is not None:
             try:
                 file_writer.stop()
+                self.time_tagger_marker("Timestamp acquisition stopped during shutdown")
             except Exception:
-                pass
+                if logger is not None:
+                    logger.exception("Timestamp acquisition stop failed during shutdown")
 
         histograms = getattr(self, "time_tagger_histograms", {})
         self.time_tagger_histograms = {}
         for histogram in histograms.values():
             try:
                 histogram.stop()
+                self.time_tagger_marker("Acquisition stopped: Histogram during shutdown")
             except Exception:
-                pass
+                if logger is not None:
+                    logger.exception("Histogram stop failed during shutdown")
 
         with self.time_tagger_counter_lock:
             counter = self.time_tagger_counter
@@ -816,18 +927,28 @@ class App(TxCommandsMixin, RxCommandsMixin):
             if counter is not None:
                 try:
                     counter.stop()
+                    self.time_tagger_marker("Acquisition stopped: Counter during shutdown")
                 except Exception:
-                    pass
+                    if logger is not None:
+                        logger.exception("Counter stop failed during shutdown")
 
         time_tagger = getattr(self, "time_tagger", None)
         self.time_tagger = None
         if time_tagger is None or TimeTagger is None:
+            self._close_time_tagger_log()
             return
 
         try:
+            self.time_tagger_marker("Acquisition stop attempts complete; device closing: freeTimeTagger")
             TimeTagger.freeTimeTagger(time_tagger)
+            if logger is not None:
+                logger.info("Time Tagger X released")
         except Exception as exc:
+            if logger is not None:
+                logger.exception("Could not release Time Tagger X")
             print("WARNING: Could not release Time Tagger X:", exc)
+        finally:
+            self._close_time_tagger_log()
 
     def open_tagger_settings_dialog(self):
         if self.time_tagger is None:
